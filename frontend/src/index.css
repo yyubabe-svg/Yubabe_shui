@@ -1,0 +1,183 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== 全局基础 ===== */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: #fafafa;
+  color: #171717;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ===== 可复用组件样式（克制、无阴影、细边框） ===== */
+
+/* 页面容器 */
+.page-container {
+  @apply max-w-6xl mx-auto;
+}
+
+/* 页面标题区 */
+.page-header {
+  @apply mb-8;
+}
+.page-header h1 {
+  @apply text-xl font-semibold text-neutral-900 tracking-tight;
+}
+.page-header p {
+  @apply text-sm text-neutral-500 mt-1;
+}
+
+/* 面板 - 克制的白色容器，仅细边框分隔 */
+.panel {
+  @apply bg-white border border-neutral-200;
+}
+
+/* 按钮 - 统一风格 */
+.btn {
+  @apply inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none;
+}
+.btn-primary {
+  @apply btn bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800;
+}
+.btn-secondary {
+  @apply btn bg-white text-neutral-700 border border-neutral-200 hover:bg-neutral-50 active:bg-neutral-100;
+}
+.btn-ghost {
+  @apply btn text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900;
+}
+
+/* 输入控件 */
+.input {
+  @apply w-full px-3 py-2 text-sm bg-white border border-neutral-200 rounded-md text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/10 transition-colors;
+}
+textarea.input {
+  @apply resize-y min-h-[80px];
+}
+select.input {
+  @apply pr-8 appearance-none bg-no-repeat bg-right;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-position: right 8px center;
+  background-size: 16px;
+}
+.label {
+  @apply block text-xs font-medium text-neutral-600 mb-1.5;
+}
+
+/* 导航项 */
+.nav-item {
+  @apply flex items-center gap-3 px-3 py-2 text-sm rounded-md text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 transition-colors cursor-pointer;
+}
+.nav-item-active {
+  @apply bg-brand-50 text-brand-700 hover:bg-brand-50 hover:text-brand-700 font-medium;
+}
+
+/* 聊天气泡 */
+.chat-bubble-user {
+  @apply bg-brand-600 text-white rounded-lg rounded-tr-sm px-4 py-2.5 text-sm;
+}
+.chat-bubble-ai {
+  @apply bg-white border border-neutral-200 text-neutral-800 rounded-lg rounded-tl-sm px-4 py-2.5 text-sm;
+}
+
+/* 分割线 */
+.divider {
+  @apply h-px bg-neutral-200;
+}
+
+/* 标签徽章 */
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 text-xs font-medium rounded;
+}
+.badge-neutral { @apply badge bg-neutral-100 text-neutral-700; }
+.badge-brand   { @apply badge bg-brand-50 text-brand-700; }
+.badge-success { @apply badge bg-green-50 text-success; }
+.badge-warning { @apply badge bg-amber-50 text-warning; }
+.badge-danger  { @apply badge bg-red-50 text-danger; }
+
+/* 空状态 */
+.empty-state {
+  @apply flex flex-col items-center justify-center py-16 text-center;
+}
+.empty-state-icon {
+  @apply w-12 h-12 text-neutral-300 mb-3;
+}
+.empty-state-text {
+  @apply text-sm text-neutral-400;
+}
+
+/* 步骤指示器 */
+.step-indicator {
+  @apply flex items-center;
+}
+.step-dot {
+  @apply w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0;
+}
+.step-line {
+  @apply flex-1 h-px mx-3;
+}
+
+/* 滚动条（更克制） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a3a3a3; }
+
+/* 表格 */
+.data-table {
+  @apply w-full text-sm;
+}
+.data-table th {
+  @apply text-left text-xs font-medium text-neutral-500 uppercase tracking-wider px-4 py-3 border-b border-neutral-200;
+}
+.data-table td {
+  @apply px-4 py-3 border-b border-neutral-100 text-neutral-700;
+}
+.data-table tr:last-child td {
+  @apply border-b-0;
+}
+
+/* ===== Markdown / Prose 样式 ===== */
+.prose {
+  @apply text-neutral-800 leading-relaxed;
+}
+.prose h1 { @apply text-lg font-bold mt-4 mb-2 text-neutral-900; }
+.prose h2 { @apply text-base font-bold mt-3 mb-2 text-neutral-900; }
+.prose h3 { @apply text-sm font-semibold mt-3 mb-1.5 text-neutral-900; }
+.prose h4 { @apply text-sm font-semibold mt-2 mb-1 text-neutral-800; }
+.prose p { @apply my-1.5; }
+.prose ul { @apply list-disc pl-5 my-2 space-y-0.5; }
+.prose ol { @apply list-decimal pl-5 my-2 space-y-0.5; }
+.prose li { @apply my-0.5; }
+.prose li > p { @apply my-0; }
+.prose strong { @apply font-semibold text-neutral-900; }
+.prose em { @apply italic; }
+.prose code { @apply bg-neutral-100 px-1.5 py-0.5 rounded text-xs font-mono text-brand-700; }
+.prose pre { @apply bg-neutral-900 text-neutral-100 p-3 rounded-lg my-3 overflow-x-auto text-xs; }
+.prose pre code { @apply bg-transparent p-0 text-neutral-100 text-xs; }
+.prose blockquote { @apply border-l-4 border-brand-200 pl-4 italic text-neutral-600 my-2; }
+.prose a { @apply text-brand-600 underline hover:text-brand-700; }
+.prose table { @apply w-full border-collapse my-3 text-sm; }
+.prose th { @apply border border-neutral-200 bg-neutral-50 px-3 py-2 text-left font-medium text-neutral-700; }
+.prose td { @apply border border-neutral-200 px-3 py-2; }
+.prose hr { @apply border-neutral-200 my-4; }
+.prose h1:first-child, .prose h2:first-child, .prose h3:first-child { @apply mt-0; }
+.prose p:last-child { @apply mb-0; }
+
+/* 用户气泡内的prose样式覆盖 */
+.bg-brand-600 .prose, .bg-brand-600 .prose p { @apply text-white; }
+.bg-brand-600 .prose strong { @apply text-white; }
+.bg-brand-600 .prose code { @apply bg-brand-700 text-white; }
+.bg-brand-600 .prose h1, .bg-brand-600 .prose h2, .bg-brand-600 .prose h3, .bg-brand-600 .prose h4 { @apply text-white; }

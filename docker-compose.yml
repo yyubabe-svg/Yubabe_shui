@@ -1,0 +1,55 @@
+# ==============================
+# 蜀水智库AI - 生产环境配置
+# 部署方式：docker-compose up -d --build
+# ==============================
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shushui-backend
+    restart: always
+    # 不直接暴露端口给外部，仅通过前端Nginx内部网络访问
+    expose:
+      - "8000"
+    volumes:
+      # 数据持久化挂载（只挂载数据目录，不挂载代码）
+      - ./backend/uploads:/app/uploads
+      - ./backend/vector_db:/app/vector_db
+      - ./backend/resources/iso_templates:/app/resources/iso_templates
+      - ./backend/shushui_ai.db:/app/shushui_ai.db
+      - ./backend/keys:/app/keys:ro
+    env_file:
+      - .env.prod
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - shushui-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: shushui-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - shushui-net
+
+networks:
+  shushui-net:
+    driver: bridge

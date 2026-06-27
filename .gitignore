@@ -1,0 +1,36 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+frontend/dist/
+frontend/node_modules/
+backend/venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+backend/keys/
+
+# Runtime data and user uploads
+backend/*.db
+backend/*.sqlite*
+backend/uploads/
+backend/vector_db/
+
+# Local/editor files
+.DS_Store
+.trae/
+*.log
+
+# Private source documents and generated office outputs
+ISO自动化/
+
+# Payment QR codes should be provided out-of-band for production
+frontend/public/qrcodes/
