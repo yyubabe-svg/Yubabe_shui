@@ -4,6 +4,8 @@ from app.models.review_report import ReviewReport
 from app.models.user_usage import UserUsage, ActivationCode
 from app.models.payment import PaymentOrder
 from app.models.agent import ConversationSession, ConversationMessage, AgentTaskLog
+from app.models.user import User, UserRole
+from app.models.permission import Permission
 from app.models.project import (
     DesignProject, ProjectType, DesignStage, ProjectStatus,
     PROJECT_TYPE_NAMES, DESIGN_STAGE_NAMES
@@ -25,6 +27,11 @@ from app.models.expert_reply import (
     ReplyTaskStatus, OpinionType, MajorCategory, ModifyStatus, ReplyStatus
 )
 from app.models.calc_history import CalcHistory
+from app.models.compliance import (
+    ComplianceProject, ComplianceChecklistTemplate, ComplianceCheckItem,
+    ComplianceChecklistInstance, ComplianceReviewItem, ComplianceReview,
+    ComplianceComment, ComplianceAttachment
+)
 
 __all__ = [
     # Document
@@ -33,6 +40,8 @@ __all__ = [
     "QALog", "ReviewReport", "UserUsage", "ActivationCode", "PaymentOrder",
     # Agent
     "ConversationSession", "ConversationMessage", "AgentTaskLog",
+    # User & Permission
+    "User", "UserRole", "Permission",
     # Project
     "DesignProject", "ProjectType", "DesignStage", "ProjectStatus",
     "PROJECT_TYPE_NAMES", "DESIGN_STAGE_NAMES",
@@ -50,4 +59,8 @@ __all__ = [
     "ReplyTaskStatus", "OpinionType", "MajorCategory", "ModifyStatus", "ReplyStatus",
     # Calc History
     "CalcHistory",
+    # Compliance
+    "ComplianceProject", "ComplianceChecklistTemplate", "ComplianceCheckItem",
+    "ComplianceChecklistInstance", "ComplianceReviewItem", "ComplianceReview",
+    "ComplianceComment", "ComplianceAttachment",
 ]

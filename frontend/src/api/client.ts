@@ -114,8 +114,12 @@ api.interceptors.response.use(
     const url = error.config?.url || ''
 
     if (status === 401) {
-      // 所有端点的401统一触发认证失败，清除用户状态并跳转登录
-      triggerAuthError(detail)
+      // 只有认证相关接口返回401时才清除登录状态（避免其他接口偶发401导致意外登出）
+      const isAuthEndpoint = url.includes('/usage/register') || url.includes('/usage/status') || url.includes('/usage/activate')
+      if (isAuthEndpoint) {
+        triggerAuthError(detail)
+      }
+      // 其他接口（如支付、上传等）的401只抛出错误，由各组件自行处理，不清除登录状态
     } else if (status === 402) {
       // 需要付费升级
       triggerUpgrade(undefined, detail)

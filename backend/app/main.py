@@ -64,20 +64,20 @@ Base.metadata.create_all(bind=engine)
 app.include_router(documents.router, prefix="/api/documents", tags=["文档管理"])
 app.include_router(qa.router, prefix="/api/qa", tags=["智能问答"])
 app.include_router(review.router, prefix="/api/review", tags=["合规审查"])
-app.include_router(projects.router, tags=["历史工程"])  # prefix已在router中定义为/api/projects
-app.include_router(flood.router, tags=["防汛预案"])      # prefix已在router中定义为/api/flood
-app.include_router(admin.router, tags=["管理后台"])      # prefix已在router中定义为/api/admin
+app.include_router(projects.router)  # prefix/tags已在router中定义: /api/projects [项目管理]
+app.include_router(flood.router)     # prefix/tags已在router中定义: /api/flood [防汛辅助]
+app.include_router(admin.router)     # prefix/tags已在router中定义: /api/admin [管理后台]
 app.include_router(upload.router, prefix="/api/upload", tags=["文件上传"])
 app.include_router(iso.router, prefix="/api/iso", tags=["ISO体系文档"])
 app.include_router(usage.router, prefix="/api/usage", tags=["用户与额度"])
 app.include_router(payment.router, prefix="/api/payment", tags=["支付"])
-app.include_router(cad.router, tags=["智能CAD"])        # prefix已在router中定义为/api/cad
+app.include_router(cad.router)       # prefix/tags已在router中定义: /api/cad [智能CAD设计]
 app.include_router(agent.router, prefix="/api/agent", tags=["AI Agent"])
-app.include_router(workspace.router, tags=["项目工作台"])  # prefix已在router中定义为/api/workspace
-app.include_router(tools.router, tags=["第二阶段工具"])      # prefix已在router中定义为/api/tools
-app.include_router(phase3.router, tags=["第三阶段工具"])    # prefix已在router中定义为/api/phase3
-app.include_router(phase4.router, tags=["第四阶段工具"])    # prefix已在router中定义为/api/phase4
-app.include_router(compliance.router, tags=["合规服务"])    # prefix已在router中定义为/api/compliance
+app.include_router(workspace.router) # prefix/tags已在router中定义: /api/workspace [项目工作台]
+app.include_router(tools.router)     # prefix/tags已在router中定义: /api/tools [第二阶段工具]
+app.include_router(phase3.router)    # prefix/tags已在router中定义: /api/phase3 [第三阶段工具]
+app.include_router(phase4.router)    # prefix/tags已在router中定义: /api/phase4 [第四阶段工具]
+app.include_router(compliance.router) # prefix/tags已在router中定义: /api/compliance [合规初审]
 
 
 @app.get("/health", tags=["系统"])
