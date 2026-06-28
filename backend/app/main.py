@@ -85,6 +85,11 @@ def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/api/health", tags=["系统"])
+def api_health_check():
+    return health_check()
+
+
 # 挂载前端静态文件（生产模式）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FRONTEND_DIST = os.path.join(PROJECT_ROOT, "frontend", "dist")

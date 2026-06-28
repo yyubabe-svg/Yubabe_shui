@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { getApiErrorMessage } from '../api/client'
 
 export default function WelcomeScreen() {
   const { login } = useAuth()
@@ -22,7 +23,7 @@ export default function WelcomeScreen() {
     try {
       await login(name.trim(), pin || undefined, isNewPin)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '登录失败，请重试')
+      setError(getApiErrorMessage(err, '登录失败，请重试'))
     } finally {
       setLoading(false)
     }

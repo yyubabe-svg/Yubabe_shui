@@ -5,20 +5,58 @@ const getBaseURL = (): string => {
   // @ts-ignore
   if (typeof window !== 'undefined' && window.__API_BASE_URL__) {
     // @ts-ignore
-    return window.__API_BASE_URL__
+    return String(window.__API_BASE_URL__).replace(/\/+$/, '')
+  }
+  const envBaseURL = import.meta.env.VITE_API_BASE_URL
+  if (envBaseURL) {
+    return String(envBaseURL).replace(/\/+$/, '')
   }
   return '/api'
 }
 
 const STORAGE_KEY = 'shushui_user'
+export const API_BASE_URL = getBaseURL()
 
 const api = axios.create({
-  baseURL: getBaseURL(),
+  baseURL: API_BASE_URL,
   timeout: 300000, // 大文件上传/AI生成可能需要较长时间（5分钟）
   headers: {
     'Content-Type': 'application/json',
   },
 })
+
+function detailToMessage(detail: unknown): string | null {
+  if (!detail) return null
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map(item => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object' && 'msg' in item) return String((item as any).msg)
+        return null
+      })
+      .filter(Boolean)
+    return messages.length ? messages.join('；') : null
+  }
+  if (typeof detail === 'object' && 'message' in detail) {
+    return String((detail as any).message)
+  }
+  return null
+}
+
+export function getApiErrorMessage(error: any, fallback = '请求失败，请重试'): string {
+  if (error?.isConnectionError || error?.code === 'ERR_NETWORK' || !error?.response) {
+    return `无法连接后端接口（${API_BASE_URL}），请检查公网 Nginx/API 代理和服务状态`
+  }
+
+  const data = error.response?.data
+  const detailMessage = detailToMessage(data?.detail ?? data)
+  if (detailMessage) return detailMessage
+
+  const status = error.response?.status
+  if (status >= 500) return '后端服务异常，请查看后端日志'
+  return fallback
+}
 
 // 内存中缓存用户名（防止localStorage被意外清除时仍能传递）
 let _cachedUserName: string | null = null
@@ -106,6 +144,7 @@ api.interceptors.response.use(
     if (error.code === 'ERR_NETWORK' || !error.response) {
       console.error('API连接失败，请确保后端服务已启动')
       error.isConnectionError = true
+      error.userMessage = getApiErrorMessage(error)
       return Promise.reject(error)
     }
 
