@@ -2,15 +2,19 @@
 合规初审模块 API 路由
 提供项目管理、检查表模板、审核流程、评论、附件、统计等接口
 """
+import asyncio
+import os
+import uuid
+import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime
-import os
-import uuid
 
 from app.core.database import get_db
 from app.core.config import settings
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user
 from app.services.compliance_service import ComplianceService
 from app.schemas.compliance import (
     ComplianceProjectCreate,
@@ -31,7 +35,7 @@ from app.schemas.compliance import (
     BatchAssignRequest,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api/compliance", tags=["合规初审"])
 
 
 def get_service(db: Session = Depends(get_db)) -> ComplianceService:
@@ -42,9 +46,12 @@ def get_service(db: Session = Depends(get_db)) -> ComplianceService:
 # ============ 统计看板 ============
 
 @router.get("/statistics", response_model=ComplianceStatistics, summary="获取合规初审统计数据")
-async def get_statistics(service: ComplianceService = Depends(get_service)):
+async def get_statistics(
+    service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
+):
     """获取统计看板数据，包括项目数量、状态分布、通过率、趋势等"""
-    return service.get_statistics()
+    return await asyncio.to_thread(service.get_statistics)
 
 
 # ============ 项目管理 ============
@@ -53,6 +60,7 @@ async def get_statistics(service: ComplianceService = Depends(get_service)):
 async def create_project(
     project_in: ComplianceProjectCreate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """
     创建新的合规初审项目
@@ -60,7 +68,7 @@ async def create_project(
     - 项目初始状态为草稿(draft)
     """
     try:
-        project = service.create_project(project_in)
+        project = await asyncio.to_thread(service.create_project, project_in)
         return project
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -76,13 +84,15 @@ async def list_projects(
     keyword: Optional[str] = Query(None, description="关键词搜索（项目名称、编号、申报单位）"),
     reviewer_id: Optional[int] = Query(None, description="审核人ID"),
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """
     获取初审项目列表，支持分页和多条件筛选
     - pending状态表示待审核（包含submitted和reviewing）
     - 返回结果包含各状态的统计数量
     """
-    items, total, statistics = service.list_projects(
+    items, total, statistics = await asyncio.to_thread(
+        service.list_projects,
         page=page,
         page_size=page_size,
         status=status,
@@ -91,7 +101,7 @@ async def list_projects(
         keyword=keyword,
         reviewer_id=reviewer_id,
     )
-    
+
     # 附加关联数量
     result_items = []
     for item in items:
@@ -99,7 +109,7 @@ async def list_projects(
         item.attachment_count = len(item.attachments) if hasattr(item, 'attachments') else 0
         item.comment_count = len(item.comments) if hasattr(item, 'comments') else 0
         result_items.append(item)
-    
+
     return ComplianceProjectListResponse(
         items=result_items,
         total=total,
@@ -113,9 +123,10 @@ async def list_projects(
 async def get_project(
     project_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """获取项目详情，包含检查表、审核记录、评论、附件等全部关联数据"""
-    project = service.get_project_with_details(project_id)
+    project = await asyncio.to_thread(service.get_project_with_details, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project
@@ -126,9 +137,10 @@ async def update_project(
     project_id: int,
     project_in: ComplianceProjectUpdate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """更新项目基本信息"""
-    project = service.update_project(project_id, project_in)
+    project = await asyncio.to_thread(service.update_project, project_id, project_in)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project
@@ -138,9 +150,10 @@ async def update_project(
 async def delete_project(
     project_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """删除项目（级联删除所有关联数据）"""
-    success = service.delete_project(project_id)
+    success = await asyncio.to_thread(service.delete_project, project_id)
     if not success:
         raise HTTPException(status_code=404, detail="项目不存在")
     return {"message": "删除成功"}
@@ -151,13 +164,14 @@ async def apply_checklist_template(
     project_id: int,
     template_id: int = Form(...),
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """为已有项目应用检查表模板，创建检查表实例"""
-    project = service.get_project(project_id)
+    project = await asyncio.to_thread(service.get_project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     try:
-        service._create_checklist_from_template(project_id, template_id)
+        await asyncio.to_thread(service._create_checklist_from_template, project_id, template_id)
         service.db.commit()
         return {"message": "检查表模板应用成功"}
     except Exception as e:
@@ -171,6 +185,7 @@ async def process_review(
     project_id: int,
     review_in: ComplianceReviewCreate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """
     执行审核流程操作：
@@ -182,19 +197,19 @@ async def process_review(
     - reject: 审核不通过（审核中→不通过）
     """
     try:
-        # TODO: 从JWT token获取当前用户信息
         user_id = None
-        user_name = "系统用户"
+        user_name = user.name
         user_dept = None
-        
-        project = service.submit_review(
+
+        await asyncio.to_thread(
+            service.submit_review,
             project_id=project_id,
             review_in=review_in,
             user_id=user_id,
             user_name=user_name,
             user_dept=user_dept,
         )
-        return service.get_project_with_details(project_id)
+        return await asyncio.to_thread(service.get_project_with_details, project_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -205,9 +220,10 @@ async def process_review(
 async def get_review_history(
     project_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """获取项目的审核操作历史记录"""
-    project = service.get_project_with_details(project_id)
+    project = await asyncio.to_thread(service.get_project_with_details, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project.reviews
@@ -217,6 +233,7 @@ async def get_review_history(
 async def batch_assign(
     batch_in: BatchAssignRequest,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """批量为多个项目分配审核人"""
     success_count = 0
@@ -227,7 +244,7 @@ async def batch_assign(
                 reviewer_id=batch_in.reviewer_id,
                 reviewer_name=batch_in.reviewer_name,
             )
-            service.submit_review(project_id, review_in)
+            await asyncio.to_thread(service.submit_review, project_id, review_in)
             success_count += 1
         except Exception:
             pass
@@ -240,9 +257,10 @@ async def batch_assign(
 async def create_template(
     template_in: ChecklistTemplateCreate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """创建检查表模板，可同时创建检查项"""
-    template = service.create_template(template_in)
+    template = await asyncio.to_thread(service.create_template, template_in)
     return template
 
 
@@ -252,9 +270,12 @@ async def list_templates(
     template_type: Optional[str] = Query(None, description="按项目类型筛选"),
     keyword: Optional[str] = Query(None, description="关键词搜索"),
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """获取检查表模板列表"""
-    templates = service.list_templates(is_active=is_active, template_type=template_type, keyword=keyword)
+    templates = await asyncio.to_thread(
+        service.list_templates, is_active=is_active, template_type=template_type, keyword=keyword
+    )
     # 添加检查项数量
     for t in templates:
         t.item_count = len(t.items) if t.items else 0
@@ -265,9 +286,10 @@ async def list_templates(
 async def get_template(
     template_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """获取检查表模板详情（包含所有检查项）"""
-    template = service.get_template(template_id)
+    template = await asyncio.to_thread(service.get_template, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="模板不存在")
     template.item_count = len(template.items) if template.items else 0
@@ -279,9 +301,10 @@ async def update_template(
     template_id: int,
     template_in: ChecklistTemplateUpdate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """更新检查表模板基本信息"""
-    template = service.update_template(template_id, template_in)
+    template = await asyncio.to_thread(service.update_template, template_id, template_in)
     if not template:
         raise HTTPException(status_code=404, detail="模板不存在")
     return template
@@ -291,9 +314,10 @@ async def update_template(
 async def delete_template(
     template_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """删除检查表模板（注意：已被项目使用的模板删除不影响已有项目数据）"""
-    success = service.delete_template(template_id)
+    success = await asyncio.to_thread(service.delete_template, template_id)
     if not success:
         raise HTTPException(status_code=404, detail="模板不存在")
     return {"message": "删除成功"}
@@ -306,18 +330,20 @@ async def add_comment(
     project_id: int,
     comment_in: CommentCreate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """添加审核意见或沟通评论，支持回复功能"""
-    project = service.get_project(project_id)
+    project = await asyncio.to_thread(service.get_project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    
-    # TODO: 从JWT获取用户信息
+
     user_id = None
-    user_name = "系统用户"
+    user_name = user.name
     user_dept = None
-    
-    comment = service.add_comment(project_id, comment_in, user_id, user_name, user_dept)
+
+    comment = await asyncio.to_thread(
+        service.add_comment, project_id, comment_in, user_id, user_name, user_dept
+    )
     return comment
 
 
@@ -325,12 +351,13 @@ async def add_comment(
 async def list_comments(
     project_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """获取项目的所有评论（树形结构）"""
-    project = service.get_project_with_details(project_id)
+    project = await asyncio.to_thread(service.get_project_with_details, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    
+
     # 过滤掉回复，只返回顶级评论
     top_comments = [c for c in project.comments if c.parent_id is None]
     return top_comments
@@ -341,9 +368,10 @@ async def update_comment(
     comment_id: int,
     comment_in: CommentUpdate,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """更新评论内容"""
-    comment = service.update_comment(comment_id, comment_in)
+    comment = await asyncio.to_thread(service.update_comment, comment_id, comment_in)
     if not comment:
         raise HTTPException(status_code=404, detail="评论不存在")
     return comment
@@ -353,9 +381,10 @@ async def update_comment(
 async def delete_comment(
     comment_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """删除评论"""
-    success = service.delete_comment(comment_id)
+    success = await asyncio.to_thread(service.delete_comment, comment_id)
     if not success:
         raise HTTPException(status_code=404, detail="评论不存在")
     return {"message": "删除成功"}
@@ -372,36 +401,50 @@ async def upload_attachment(
     description: Optional[str] = Form(None, description="附件说明"),
     is_required: bool = Form(False, description="是否必备文件"),
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
-    """上传项目相关附件"""
-    project = service.get_project(project_id)
+    """上传项目相关附件（aiofiles异步分块写入，UUID文件名，路径遍历防护）"""
+    project = await asyncio.to_thread(service.get_project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    
+
     # 创建上传目录
     upload_dir = os.path.join(settings.UPLOAD_DIR, "compliance", str(project_id))
     os.makedirs(upload_dir, exist_ok=True)
-    
-    # 生成唯一文件名
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
+
+    # 生成唯一文件名（UUID，防路径遍历）
+    file_ext = os.path.splitext(file.filename or "")[1]
+    # 禁止.doc格式
+    if file_ext.lower() == ".doc":
+        raise HTTPException(status_code=400, detail="不支持.doc格式，请转换为.docx或PDF后上传")
     unique_filename = f"{uuid.uuid4().hex}{file_ext}"
     file_path = os.path.join(upload_dir, unique_filename)
-    
-    # 保存文件
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    # TODO: 从JWT获取用户信息
+
+    # 路径遍历防护
+    upload_dir_real = os.path.realpath(upload_dir)
+    file_path_real = os.path.realpath(file_path)
+    if not file_path_real.startswith(upload_dir_real + os.sep):
+        raise HTTPException(status_code=400, detail="非法文件路径")
+
+    # aiofiles异步分块写入
+    file_size = 0
+    async with aiofiles.open(file_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            await f.write(chunk)
+            file_size += len(chunk)
+            if file_size > 50 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="文件大小超过限制(50MB)")
+
     uploader_id = None
-    uploader_name = "系统用户"
-    
-    attachment = service.add_attachment(
+    uploader_name = user.name
+
+    attachment = await asyncio.to_thread(
+        service.add_attachment,
         project_id=project_id,
         file_name=file.filename or unique_filename,
         file_path=file_path,
         file_type=file_type,
-        file_size=len(content),
+        file_size=file_size,
         mime_type=file.content_type,
         category=category,
         uploader_id=uploader_id,
@@ -409,7 +452,7 @@ async def upload_attachment(
         description=description,
         is_required=is_required,
     )
-    
+
     return attachment
 
 
@@ -417,9 +460,10 @@ async def upload_attachment(
 async def delete_attachment(
     attachment_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """删除附件（同时删除物理文件）"""
-    success = service.delete_attachment(attachment_id)
+    success = await asyncio.to_thread(service.delete_attachment, attachment_id)
     if not success:
         raise HTTPException(status_code=404, detail="附件不存在")
     return {"message": "删除成功"}
@@ -431,10 +475,13 @@ async def delete_attachment(
 async def generate_report(
     project_id: int,
     service: ComplianceService = Depends(get_service),
+    user: UserUsage = Depends(get_current_user),
 ):
     """生成合规初审报告数据（用于前端展示或导出）"""
     try:
-        report_data = service.generate_review_report(project_id)
+        report_data = await asyncio.to_thread(service.generate_review_report, project_id)
         return report_data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"报告生成失败: {str(e)}")

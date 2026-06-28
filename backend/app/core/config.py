@@ -39,16 +39,16 @@ class Settings(BaseSettings):
     VOLCANO_API_KEY: Optional[str] = None
     VOLCANO_BASE_URL: Optional[str] = None
     
-    # LLM 配置
-    LLM_PROVIDER: str = "mock"  # mock, openai, volcano
-    LLM_MODEL: str = "gpt-3.5-turbo"
+    # LLM 配置 - 默认使用volcano（火山方舟）
+    LLM_PROVIDER: str = "volcano"  # mock, openai, volcano
+    LLM_MODEL: str = "ep-xxxxxxxx-xxxx"  # ⚠️ 必须替换为火山方舟推理接入点ID（格式：ep-xxxxxxxx-xxxx）
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
     
-    # Mock 模式
-    MOCK_MODE: bool = True
+    # Mock 模式 - 修复8：默认关闭Mock模式
+    MOCK_MODE: bool = False
 
-    # 免费版额度配置
+    # 免费版额度配置 - 修复8：支持从环境变量读取
     FREE_MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5MB
     PRO_MAX_FILE_SIZE: int = 50 * 1024 * 1024  # 50MB
     FREE_TOTAL_STORAGE: int = 20 * 1024 * 1024  # 20MB
@@ -81,8 +81,11 @@ class Settings(BaseSettings):
     # 个人收款码模式（适合个人开发者，无需企业资质）
     # 使用方式：用户扫码转账后，联系管理员获取激活码
     MANUAL_PAYMENT_ENABLED: bool = True  # 启用个人收款码模式
-    MANUAL_PAYMENT_QR_URL: str = "/qrcodes/alipay.svg"  # 收款码图片路径（放在frontend/public/qrcodes/下）
+    MANUAL_PAYMENT_QR_URL: str = "/qrcodes/alipay.png"  # 收款码图片路径（放在frontend/public/qrcodes/下，支持PNG/JPG/SVG）
     MANUAL_PAYMENT_NOTE: str = "扫码转账后，请添加管理员微信发送转账截图获取激活码"
+
+    # 二维码文件搜索目录（base64内嵌用；默认为空时自动在项目目录中查找）
+    QR_CODE_DIR: str = ""
     
     # Chunk 配置
     CHUNK_SIZE: int = 500
@@ -103,7 +106,8 @@ class Settings(BaseSettings):
     FAISS_MIN_VECTORS_FOR_IVF: int = 5000  # 向量数超过此值使用IVF索引
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # 修复8：env_file基于文件绝对路径查找，避免工作目录变化导致.env找不到
+        env_file=os.path.join(BASE_DIR, ".env"),
         case_sensitive=True,
         extra="ignore",
     )

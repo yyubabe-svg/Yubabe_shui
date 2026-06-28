@@ -18,8 +18,8 @@ services:
       # 数据持久化挂载（只挂载数据目录，不挂载代码）
       - ./backend/uploads:/app/uploads
       - ./backend/vector_db:/app/vector_db
+      - ./backend/db_data:/app/db_data
       - ./backend/resources/iso_templates:/app/resources/iso_templates
-      - ./backend/shushui_ai.db:/app/shushui_ai.db
       - ./backend/keys:/app/keys:ro
     env_file:
       - .env.prod
@@ -29,10 +29,10 @@ services:
       - shushui-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 180s  # sentence-transformers首次下载加载需要时间
 
   frontend:
     build:
@@ -49,6 +49,12 @@ services:
       - TZ=Asia/Shanghai
     networks:
       - shushui-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   shushui-net:

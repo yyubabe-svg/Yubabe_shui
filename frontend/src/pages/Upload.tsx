@@ -15,6 +15,7 @@ export default function Upload() {
   const [title, setTitle] = useState('')
   const [docType, setDocType] = useState('水利规范')
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [parsing, setParsing] = useState(false)
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
@@ -53,6 +54,7 @@ export default function Upload() {
   const handleUpload = async () => {
     if (!file) return
     setUploading(true)
+    setUploadProgress(0)
     setError('')
     const formData = new FormData()
     formData.append('file', file)
@@ -60,16 +62,26 @@ export default function Upload() {
     formData.append('doc_type', docType)
     try {
       const res = await api.post('/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 300000,
+        onUploadProgress: (e: any) => {
+          if (e.total) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100))
+          }
+        },
       })
       setUploadedDocId(res.data.doc_id)
       // 自动解析入库
       setParsing(true)
+      setError(null)
       try {
-        await api.post(`/documents/${res.data.doc_id}/parse`)
-      } catch {}
-      setParsing(false)
-      setSuccess(true)
+        await api.post(`/documents/${res.data.doc_id}/parse`, {}, { timeout: 300000 })
+        setSuccess(true)
+      } catch (parseErr: any) {
+        console.error('文档解析失败:', parseErr)
+        setError(`文档上传成功，但解析过程出现问题：${parseErr?.response?.data?.detail || parseErr?.message || '未知错误'}。您可以稍后在文档列表中查看。`)
+      } finally {
+        setParsing(false)
+      }
       refreshUsage()
     } catch (e: any) {
       const detail = e?.response?.data?.detail
@@ -79,12 +91,13 @@ export default function Upload() {
       }
     } finally {
       setUploading(false)
+      setUploadProgress(0)
     }
   }
 
   const reset = () => {
     setFile(null); setTitle(''); setSuccess(false); setError('')
-    setUploadedDocId(null); setParsing(false)
+    setUploadedDocId(null); setParsing(false); setUploadProgress(0)
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -208,10 +221,25 @@ export default function Upload() {
             </div>
           )}
 
+          {uploading && uploadProgress > 0 && (
+            <div className="w-full">
+              <div className="flex justify-between text-xs text-neutral-500 mb-1">
+                <span>上传进度</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-brand-500 rounded-full transition-all duration-200"
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="flex justify-end gap-2">
             {(uploading || parsing) && (
               <span className="text-xs text-neutral-400 self-center">
-                {uploading ? '上传中...' : '解析中...'}
+                {uploading ? `上传中 ${uploadProgress}%` : '解析中...'}
               </span>
             )}
             <button

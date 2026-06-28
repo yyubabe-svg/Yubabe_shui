@@ -8,10 +8,15 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
-      - ./uploads:/app/uploads
-      - ./vector_db:/app/vector_db
+      - ./backend/uploads:/app/uploads
+      - ./backend/vector_db:/app/vector_db
+      - ./backend/db_data:/app/db_data
+      - ./backend/keys:/app/keys
+      - ./backend/resources/iso_templates:/app/resources/iso_templates
     environment:
-      - DATABASE_URL=sqlite:///./shushui_ai.db
+      - DATABASE_URL=sqlite:////app/db_data/shushui_ai.db
+      - UPLOAD_DIR=/app/uploads
+      - VECTOR_DB_PATH=/app/vector_db
       - MOCK_MODE=true
     restart: unless-stopped
 

@@ -1,18 +1,31 @@
-import os
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import FileResponse
-from typing import Optional
+import asyncio
 import json
+import os
+import uuid
+from typing import Optional
 
+import aiofiles
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Request
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
 from app.core.database import get_db
 from app.schemas.iso import ISOGenerateResponse, ISOFillRequest
 from app.services.iso_service import iso_service
-from app.core.config import settings
 from app.api.routes.usage import get_current_user, check_feature_access
 from app.models.user_usage import UserUsage
 
 router = APIRouter()
+
+
+async def _safe_remove_iso_file(path: str):
+    """安全删除临时文件"""
+    if os.path.exists(path):
+        try:
+            await asyncio.to_thread(os.remove, path)
+        except Exception:
+            pass
 
 
 @router.post("/generate", summary="上传项目报告，自动生成ISO管理体系附表")
@@ -20,33 +33,74 @@ async def generate_iso_document(
     file: UploadFile = File(...),
     project_manager: Optional[str] = Form(None),
     supplementary_info: Optional[str] = Form(None),
+    request: Request = None,
     user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """上传项目设计报告，自动解析并填写ISO管理体系附表"""
+    """上传项目设计报告，自动解析并填写ISO管理体系附表（UUID文件名防路径遍历，aiofiles异步写入）"""
     # 检查ISO权限（Mock模式不限制）
     if not settings.MOCK_MODE:
         check = check_feature_access(user, "iso", db=db)
         if not check.allowed:
             raise HTTPException(status_code=402, detail=check.reason)
     
+    # 检查文件格式（移除.doc支持）
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    allowed_exts = {'.pdf', '.docx', '.txt', '.md', '.xlsx', '.xls'}
+    if file_ext == '.doc':
+        raise HTTPException(status_code=400, detail=".doc格式不支持，请转换为.docx后再上传")
+    if file_ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {file_ext}")
+    
     upload_dir = os.path.join(settings.UPLOAD_DIR, "iso_temp")
     os.makedirs(upload_dir, exist_ok=True)
     
-    file_path = os.path.join(upload_dir, file.filename)
+    # 使用UUID文件名，防止路径遍历
+    file_id = str(uuid.uuid4())
+    saved_filename = f"{file_id}{file_ext}"
+    file_path = os.path.join(upload_dir, saved_filename)
     
+    # 路径遍历防护
+    upload_dir_real = os.path.realpath(upload_dir)
+    file_path_real = os.path.realpath(file_path)
+    if not file_path_real.startswith(upload_dir_real + os.sep):
+        raise HTTPException(status_code=400, detail="非法文件路径")
+    
+    # 检查Content-Length
+    content_length = 0
+    if request and "content-length" in request.headers:
+        try:
+            content_length = int(request.headers["content-length"])
+        except (ValueError, TypeError):
+            pass
+    
+    max_allowed = settings.PRO_MAX_FILE_SIZE if user.is_pro_active() else settings.FREE_MAX_FILE_SIZE
+    if content_length > 0 and content_length > max_allowed:
+        limit_mb = max_allowed // 1024 // 1024
+        raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
+    
+    file_size = 0
     try:
-        contents = await file.read()
-        with open(file_path, 'wb') as f:
-            f.write(contents)
+        # aiofiles异步分块写入
+        async with aiofiles.open(file_path, 'wb') as f:
+            while chunk := await file.read(1024 * 1024):
+                await f.write(chunk)
+                file_size += len(chunk)
+                if file_size > max_allowed:
+                    limit_mb = max_allowed // 1024 // 1024
+                    raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
+    except HTTPException:
+        await _safe_remove_iso_file(file_path)
+        raise
     except Exception as e:
+        await _safe_remove_iso_file(file_path)
         raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
     
     supp_info = {}
     if supplementary_info:
         try:
             supp_info = json.loads(supplementary_info)
-        except:
+        except Exception:
             pass
     if project_manager:
         supp_info["project_manager"] = project_manager
@@ -125,7 +179,7 @@ async def download_iso_document(task_id: str, user: UserUsage = Depends(get_curr
 
 @router.get("/majors")
 async def get_majors():
-    """获取专业列表"""
+    """获取专业列表（公开接口，无需认证）"""
     from app.services.iso_service import ALL_MAJORS
     return {
         "majors": ALL_MAJORS,
@@ -136,7 +190,7 @@ async def get_majors():
 
 @router.get("/template-info")
 async def get_template_info():
-    """获取ISO模板信息"""
+    """获取ISO模板信息（公开接口，无需认证）"""
     return {
         "template_name": "管理体系附表-设计部分",
         "forms": [

@@ -1,24 +1,32 @@
 """工作台API路由 - 整合表单填报、AI初审、章节生成、专家回复"""
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
-from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.params import Body
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from typing import Optional, List
-from pydantic import BaseModel
 import json
 import os
 import uuid
+from typing import Optional, List
 
+import aiofiles
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Request
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.params import Body
+from pydantic import BaseModel
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
 from app.core.database import get_db, SessionLocal
+from app.models.document import Document, ParseStatus, FileType
 from app.models.form_template import FormTemplate, FormFillTask, FormFillStatus, FormFillFieldValue, FormField
 from app.models.report_section import ReportSectionTemplate, ReportSectionTask, ReportSectionDraft, SectionTaskStatus
 from app.models.ai_review import AIReviewTask, AIReviewIssue, ReviewStatus, IssueStatus
 from app.models.expert_reply import ExpertReplyTask, ExpertOpinion, ExpertReplyItem, ReplyTaskStatus
-from app.models.document import Document
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user, check_feature_access
 
 router = APIRouter(prefix="/api/workspace", tags=["项目工作台"])
+
+WORKSPACE_UPLOAD_DIR = settings.UPLOAD_DIR
+os.makedirs(WORKSPACE_UPLOAD_DIR, exist_ok=True)
 
 
 # ========== 请求体模型 ==========
@@ -50,11 +58,28 @@ class UpdateFormFieldsRequest(BaseModel):
     fields: dict
 
 
+async def _safe_remove_workspace_file(path: str):
+    """安全删除文件"""
+    if os.path.exists(path):
+        try:
+            await asyncio.to_thread(os.remove, path)
+        except Exception:
+            pass
+
+
+def _validate_path_within_uploads(file_path: str) -> bool:
+    """路径遍历防护：确保文件路径在uploads目录内"""
+    upload_dir = os.path.realpath(settings.UPLOAD_DIR)
+    real_path = os.path.realpath(file_path)
+    return real_path.startswith(upload_dir + os.sep) or real_path == upload_dir
+
+
 # ========== 表单填报 ==========
 
 @router.get("/form-templates")
 async def list_form_templates(
     project_type: Optional[str] = None,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """获取表单模板列表"""
@@ -80,6 +105,7 @@ async def list_form_templates(
 async def create_form_task(
     project_id: int,
     data: CreateFormTaskRequest,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """创建表单填报任务"""
@@ -88,13 +114,17 @@ async def create_form_task(
         project_id=project_id,
         template_id=data.template_id,
         document_id=data.document_id,
-        created_by="system"
+        created_by=user.name
     )
     return {"task_id": task.id, "status": task.status}
 
 
 @router.post("/form-tasks/{task_id}/extract")
-async def extract_form_fields(task_id: int, db: Session = Depends(get_db)):
+async def extract_form_fields(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """执行字段提取"""
     from app.services.form_fill_engine import form_fill_engine
     result = await form_fill_engine.extract_fields(task_id)
@@ -102,7 +132,11 @@ async def extract_form_fields(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/form-tasks/{task_id}")
-async def get_form_task(task_id: int, db: Session = Depends(get_db)):
+async def get_form_task(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取填报任务详情"""
     task = db.query(FormFillTask).filter(FormFillTask.id == task_id).first()
     if not task:
@@ -145,7 +179,12 @@ async def get_form_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/form-tasks/{task_id}/fields")
-async def update_form_fields(task_id: int, data: UpdateFormFieldsRequest, db: Session = Depends(get_db)):
+async def update_form_fields(
+    task_id: int,
+    data: UpdateFormFieldsRequest,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """更新确认后的字段值"""
     task = db.query(FormFillTask).filter(FormFillTask.id == task_id).first()
     if not task:
@@ -166,7 +205,11 @@ async def update_form_fields(task_id: int, data: UpdateFormFieldsRequest, db: Se
 
 
 @router.post("/form-tasks/{task_id}/fill")
-async def fill_form_template(task_id: int, db: Session = Depends(get_db)):
+async def fill_form_template(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """执行模板填充"""
     from app.services.form_fill_engine import form_fill_engine
     
@@ -191,7 +234,11 @@ async def fill_form_template(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/form-tasks/{task_id}/download")
-async def download_form_result(task_id: int, db: Session = Depends(get_db)):
+async def download_form_result(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """下载生成的表格"""
     task = db.query(FormFillTask).filter(FormFillTask.id == task_id).first()
     if not task or not task.output_file_path:
@@ -199,6 +246,10 @@ async def download_form_result(task_id: int, db: Session = Depends(get_db)):
     
     if not os.path.exists(task.output_file_path):
         raise HTTPException(status_code=404, detail="文件已删除")
+    
+    # 路径遍历防护
+    if not _validate_path_within_uploads(task.output_file_path):
+        raise HTTPException(status_code=400, detail="非法文件路径")
     
     return FileResponse(
         task.output_file_path,
@@ -208,7 +259,11 @@ async def download_form_result(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/projects/{project_id}/form-tasks")
-async def list_project_form_tasks(project_id: int, db: Session = Depends(get_db)):
+async def list_project_form_tasks(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取项目的表单填报任务列表"""
     tasks = db.query(FormFillTask).filter(FormFillTask.project_id == project_id).order_by(desc(FormFillTask.created_at)).all()
     return {
@@ -232,6 +287,7 @@ async def list_project_form_tasks(project_id: int, db: Session = Depends(get_db)
 async def create_review_task(
     project_id: int,
     data: CreateReviewTaskRequest,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """创建AI初审任务"""
@@ -245,7 +301,7 @@ async def create_review_task(
         review_dimensions=data.dimensions or ["param_completeness", "code_compliance", "chapter_completeness", "value_consistency", "format_standard"],
         status=ReviewStatus.PENDING.value,
         progress=0,
-        created_by="system"
+        created_by=user.name
     )
     db.add(task)
     db.commit()
@@ -254,7 +310,12 @@ async def create_review_task(
 
 
 @router.post("/review-tasks/{task_id}/run")
-async def run_review(task_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def run_review(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """执行AI初审（后台任务）"""
     def _run_review_sync():
         asyncio.run(_run_review_bg())
@@ -282,7 +343,11 @@ async def run_review(task_id: int, background_tasks: BackgroundTasks, db: Sessio
 
 
 @router.get("/review-tasks/{task_id}/stream")
-async def stream_review_progress(task_id: int, db: Session = Depends(get_db)):
+async def stream_review_progress(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """SSE流式审查进度（轮询模拟）"""
     async def event_generator():
         while True:
@@ -310,7 +375,11 @@ async def stream_review_progress(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/review-tasks/{task_id}")
-async def get_review_task(task_id: int, db: Session = Depends(get_db)):
+async def get_review_task(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取AI初审结果"""
     task = db.query(AIReviewTask).filter(AIReviewTask.id == task_id).first()
     if not task:
@@ -353,7 +422,12 @@ async def get_review_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.patch("/review-issues/{issue_id}")
-async def update_review_issue(issue_id: int, data: dict, db: Session = Depends(get_db)):
+async def update_review_issue(
+    issue_id: int,
+    data: dict,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """更新问题状态"""
     issue = db.query(AIReviewIssue).filter(AIReviewIssue.id == issue_id).first()
     if not issue:
@@ -369,11 +443,15 @@ async def update_review_issue(issue_id: int, data: dict, db: Session = Depends(g
 
 
 @router.post("/review-tasks/{task_id}/export")
-async def export_review_report(task_id: int, db: Session = Depends(get_db)):
+async def export_review_report(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """导出审查意见Word"""
     from app.services.ai_review_engine import AIReviewEngine
     engine = AIReviewEngine(db)
-    result = engine.export_report(task_id)
+    result = await asyncio.to_thread(engine.export_report, task_id)
     
     return FileResponse(
         result["file_path"],
@@ -387,6 +465,7 @@ async def export_review_report(task_id: int, db: Session = Depends(get_db)):
 @router.get("/section-templates")
 async def list_section_templates(
     project_type: Optional[str] = None,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """获取章节模板列表"""
@@ -413,6 +492,7 @@ async def list_section_templates(
 async def create_section_task(
     project_id: int,
     data: CreateSectionTaskRequest,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """创建章节生成任务"""
@@ -423,7 +503,7 @@ async def create_section_task(
         template_id=data.template_id,
         doc_ids=data.document_ids or [],
         params=data.params or {},
-        created_by="system"
+        created_by=user.name
     )
     db.commit()
     db.refresh(task)
@@ -431,7 +511,11 @@ async def create_section_task(
 
 
 @router.post("/section-tasks/{task_id}/generate-outline")
-async def generate_section_outline(task_id: int, db: Session = Depends(get_db)):
+async def generate_section_outline(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """生成章节大纲"""
     from app.services.section_generator import SectionGenerator
     engine = SectionGenerator(db)
@@ -440,7 +524,11 @@ async def generate_section_outline(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/section-tasks/{task_id}")
-async def get_section_task(task_id: int, db: Session = Depends(get_db)):
+async def get_section_task(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取章节生成任务详情"""
     task = db.query(ReportSectionTask).filter(ReportSectionTask.id == task_id).first()
     if not task:
@@ -476,7 +564,12 @@ async def get_section_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/section-tasks/{task_id}/generate")
-async def generate_section_content(task_id: int, start_from: Optional[str] = None, db: Session = Depends(get_db)):
+async def generate_section_content(
+    task_id: int,
+    start_from: Optional[str] = None,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """SSE流式生成章节内容"""
     from app.services.section_generator import SectionGenerator
     engine = SectionGenerator(db)
@@ -492,7 +585,12 @@ async def generate_section_content(task_id: int, start_from: Optional[str] = Non
 
 
 @router.patch("/section-drafts/{draft_id}")
-async def update_section_draft(draft_id: int, data: dict, db: Session = Depends(get_db)):
+async def update_section_draft(
+    draft_id: int,
+    data: dict,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """编辑段落"""
     draft = db.query(ReportSectionDraft).filter(ReportSectionDraft.id == draft_id).first()
     if not draft:
@@ -500,14 +598,18 @@ async def update_section_draft(draft_id: int, data: dict, db: Session = Depends(
     
     if "content" in data:
         draft.content = data["content"]
-        draft.status = "edited"
+        draft.status = SectionTaskStatus.EDITED.value if hasattr(SectionTaskStatus, 'EDITED') else "edited"
     
     db.commit()
     return {"message": "更新成功"}
 
 
 @router.post("/section-drafts/{draft_id}/accept")
-async def accept_section_draft(draft_id: int, db: Session = Depends(get_db)):
+async def accept_section_draft(
+    draft_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """接受段落"""
     draft = db.query(ReportSectionDraft).filter(ReportSectionDraft.id == draft_id).first()
     if not draft:
@@ -520,11 +622,15 @@ async def accept_section_draft(draft_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/section-tasks/{task_id}/export")
-async def export_section_docx(task_id: int, db: Session = Depends(get_db)):
+async def export_section_docx(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """导出章节Word"""
     from app.services.section_generator import SectionGenerator
     engine = SectionGenerator(db)
-    result = engine.export_docx(task_id)
+    result = await asyncio.to_thread(engine.export_docx, task_id)
     
     return FileResponse(
         result["file_path"],
@@ -539,6 +645,7 @@ async def export_section_docx(task_id: int, db: Session = Depends(get_db)):
 async def create_expert_reply_task(
     project_id: int,
     data: CreateExpertReplyTaskRequest,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """创建专家意见回复任务"""
@@ -550,7 +657,7 @@ async def create_expert_reply_task(
         report_doc_id=data.report_document_id,
         meeting_name=data.meeting_name,
         meeting_date=data.meeting_date,
-        created_by="system"
+        created_by=user.name
     )
     db.commit()
     db.refresh(task)
@@ -558,7 +665,12 @@ async def create_expert_reply_task(
 
 
 @router.post("/expert-reply-tasks/{task_id}/parse-opinions")
-async def parse_expert_opinions(task_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def parse_expert_opinions(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """解析专家意见（后台任务）"""
     def _parse_sync():
         asyncio.run(_parse_bg())
@@ -586,7 +698,11 @@ async def parse_expert_opinions(task_id: int, background_tasks: BackgroundTasks,
 
 
 @router.get("/expert-reply-tasks/{task_id}")
-async def get_expert_reply_task(task_id: int, db: Session = Depends(get_db)):
+async def get_expert_reply_task(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取专家回复任务详情"""
     task = db.query(ExpertReplyTask).filter(ExpertReplyTask.id == task_id).first()
     if not task:
@@ -629,7 +745,11 @@ async def get_expert_reply_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/expert-opinions/{opinion_id}/generate-reply")
-async def generate_opinion_reply(opinion_id: int, db: Session = Depends(get_db)):
+async def generate_opinion_reply(
+    opinion_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """生成单条意见回复"""
     from app.services.expert_reply_service import ExpertReplyService
     engine = ExpertReplyService(db)
@@ -646,7 +766,12 @@ async def generate_opinion_reply(opinion_id: int, db: Session = Depends(get_db))
 
 
 @router.post("/expert-reply-tasks/{task_id}/generate-all")
-async def generate_all_replies(task_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def generate_all_replies(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """批量生成所有回复（后台任务）"""
     def _gen_sync():
         asyncio.run(_gen_bg())
@@ -676,7 +801,12 @@ async def generate_all_replies(task_id: int, background_tasks: BackgroundTasks, 
 
 
 @router.patch("/expert-opinions/{opinion_id}")
-async def update_opinion_reply(opinion_id: int, data: dict, db: Session = Depends(get_db)):
+async def update_opinion_reply(
+    opinion_id: int,
+    data: dict,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """更新意见回复"""
     from app.services.expert_reply_service import ExpertReplyService
     engine = ExpertReplyService(db)
@@ -691,11 +821,15 @@ async def update_opinion_reply(opinion_id: int, data: dict, db: Session = Depend
 
 
 @router.post("/expert-reply-tasks/{task_id}/export")
-async def export_reply_table(task_id: int, db: Session = Depends(get_db)):
+async def export_reply_table(
+    task_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """导出回复表Word"""
     from app.services.expert_reply_service import ExpertReplyService
     engine = ExpertReplyService(db)
-    result = engine.export_reply_table(task_id)
+    result = await asyncio.to_thread(engine.export_reply_table, task_id)
     
     return FileResponse(
         result["file_path"],
@@ -712,6 +846,7 @@ async def unified_search(
     project_id: Optional[int] = None,
     file_types: Optional[str] = None,
     limit: int = 20,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """统一检索接口 - 搜索规范、历史项目、项目文档"""
@@ -720,7 +855,8 @@ async def unified_search(
     # 解析文件类型过滤
     ft_list = file_types.split(",") if file_types else None
     
-    results = retrieval_service.search(
+    results = await asyncio.to_thread(
+        retrieval_service.search,
         query=q,
         project_id=project_id,
         file_types=ft_list,
@@ -735,9 +871,10 @@ async def unified_search(
 @router.post("/ask")
 async def ask_question(
     data: dict,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """水利规范问答接口（RAG）"""
+    """水利规范问答接口（RAG）- await llm_service.chat()调用"""
     from app.services.llm_service import llm_service
     from app.services.retrieval_service import retrieval_service
     
@@ -747,8 +884,9 @@ async def ask_question(
     if not question:
         raise HTTPException(status_code=400, detail="问题不能为空")
     
-    # 检索相关文档
-    contexts = retrieval_service.search(
+    # 检索相关文档（同步操作用to_thread包裹）
+    contexts = await asyncio.to_thread(
+        retrieval_service.search,
         query=question,
         project_id=project_id,
         top_k=5
@@ -767,8 +905,8 @@ async def ask_question(
 {context_text}
 """
     
-    # 调用LLM
-    answer = llm_service.chat(
+    # 调用LLM（chat是async方法，必须await）
+    answer = await llm_service.chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question}
@@ -793,7 +931,11 @@ async def ask_question(
 # ========== 项目概览 ==========
 
 @router.get("/projects/{project_id}/overview")
-async def get_project_overview(project_id: int, db: Session = Depends(get_db)):
+async def get_project_overview(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取项目概览统计"""
     from app.models.project import DesignProject
     
@@ -859,13 +1001,8 @@ async def get_project_overview(project_id: int, db: Session = Depends(get_db)):
 
 # ========== 项目文档管理 ==========
 
-WORKSPACE_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "uploads")
-os.makedirs(WORKSPACE_UPLOAD_DIR, exist_ok=True)
-
-
 def _infer_file_type(filename: str) -> str:
     """根据文件名推断文档类型"""
-    from app.models.document import FileType
     name = filename.lower()
     if '规范' in filename or '标准' in filename or '规程' in filename:
         return FileType.STANDARD.value
@@ -879,7 +1016,8 @@ def _infer_file_type(filename: str) -> str:
 
 
 def _parse_workspace_document_background(document_id: int, file_path: str):
-    """工作台文档后台解析（与projects.py中逻辑一致，但独立以避免循环依赖）"""
+    """工作台文档后台解析（使用ParseStatus枚举代替硬编码中文）"""
+    db = None
     try:
         from app.services.document_parser import document_parser
         from app.services.embedding import embedding_service as emb_svc
@@ -888,10 +1026,9 @@ def _parse_workspace_document_background(document_id: int, file_path: str):
         db = SessionLocal()
         doc = db.query(Document).filter(Document.id == document_id).first()
         if not doc:
-            db.close()
             return
         
-        doc.parse_status = "解析中"
+        doc.parse_status = ParseStatus.PARSING.value
         db.commit()
         
         try:
@@ -900,7 +1037,7 @@ def _parse_workspace_document_background(document_id: int, file_path: str):
             doc.total_pages = parsed.total_pages
             doc.table_count = len(parsed.tables)
             doc.chapter_json = [{"number": c.number, "title": c.title, "level": c.level} for c in parsed.chapters]
-            doc.parse_status = "已完成"
+            doc.parse_status = ParseStatus.COMPLETED.value
             
             from app.models.document import Chunk as DBChunk
             for i, chunk in enumerate(chunks):
@@ -949,12 +1086,13 @@ def _parse_workspace_document_background(document_id: int, file_path: str):
             
         except Exception as e:
             print(f"[Workspace] 文档解析失败: {e}")
-            doc.parse_status = "失败"
+            doc.parse_status = ParseStatus.FAILED.value
             db.commit()
-        
-        db.close()
     except Exception as e:
         print(f"[Workspace] 后台解析任务异常: {e}")
+    finally:
+        if db:
+            db.close()
 
 
 @router.post("/projects/{project_id}/documents")
@@ -964,58 +1102,114 @@ async def workspace_upload_document(
     file: UploadFile = File(...),
     is_report: bool = False,
     is_expert_opinion: bool = False,
+    request: Request = None,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """工作台上传项目文档"""
+    """工作台上传项目文档（aiofiles异步分块写入，移除.doc，不返回绝对file_path，路径防护）"""
     from app.models.project import DesignProject
-    from app.models.document import ParseStatus as DocParseStatus
     
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
     ext = os.path.splitext(file.filename)[1].lower()
-    allowed_exts = {'.pdf', '.docx', '.doc', '.txt', '.xlsx', '.xls'}
+    # 移除.doc格式支持
+    allowed_exts = {'.pdf', '.docx', '.txt', '.md', '.markdown', '.xlsx', '.xls'}
+    if ext == '.doc':
+        raise HTTPException(status_code=400, detail=".doc格式不支持，请转换为.docx后再上传")
     if ext not in allowed_exts:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
     
-    filename = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(WORKSPACE_UPLOAD_DIR, filename)
+    file_id = str(uuid.uuid4())
+    saved_filename = f"{file_id}{ext}"
+    file_path = os.path.join(WORKSPACE_UPLOAD_DIR, saved_filename)
     
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # 路径遍历防护：确保file_path在uploads目录内
+    if not _validate_path_within_uploads(file_path):
+        raise HTTPException(status_code=400, detail="非法文件路径")
     
-    file_type = _infer_file_type(file.filename)
+    # 检查Content-Length
+    content_length = 0
+    if request and "content-length" in request.headers:
+        try:
+            content_length = int(request.headers["content-length"])
+        except (ValueError, TypeError):
+            pass
     
-    doc = Document(
-        title=file.filename,
-        file_type=file_type,
-        file_path=file_path,
-        original_filename=file.filename,
-        file_size=len(content),
-        parse_status=DocParseStatus.PENDING.value,
-        project_id=project_id,
-        is_report=is_report,
-        is_expert_opinion=is_expert_opinion,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
+    max_allowed = settings.PRO_MAX_FILE_SIZE if user.is_pro_active() else settings.FREE_MAX_FILE_SIZE
+    if content_length > 0 and content_length > max_allowed:
+        limit_mb = max_allowed // 1024 // 1024
+        raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
     
-    if background_tasks:
-        background_tasks.add_task(_parse_workspace_document_background, doc.id, file_path)
-    
-    return {
-        "document_id": doc.id,
-        "message": "文档上传成功，正在后台解析",
-        "parse_status": doc.parse_status
-    }
+    file_size = 0
+    try:
+        # aiofiles异步分块写入
+        async with aiofiles.open(file_path, 'wb') as f:
+            while chunk := await file.read(1024 * 1024):
+                await f.write(chunk)
+                file_size += len(chunk)
+                if file_size > max_allowed:
+                    limit_mb = max_allowed // 1024 // 1024
+                    raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
+        
+        # 检查存储额度
+        if not settings.MOCK_MODE:
+            check = check_feature_access(user, "upload", file_size=file_size, db=db)
+            if not check.allowed:
+                await _safe_remove_workspace_file(file_path)
+                raise HTTPException(status_code=402, detail=check.reason)
+        
+        file_type = _infer_file_type(file.filename)
+        
+        doc = Document(
+            title=file.filename,
+            file_type=file_type,
+            file_path=file_path,
+            original_filename=file.filename,
+            file_size=file_size,
+            parse_status=ParseStatus.PENDING.value,
+            project_id=project_id,
+            is_report=is_report,
+            is_expert_opinion=is_expert_opinion,
+            upload_user=user.name,
+        )
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        
+        # 累加存储量
+        if not settings.MOCK_MODE:
+            user.total_upload_bytes += file_size
+            db.commit()
+        
+        if background_tasks:
+            background_tasks.add_task(_parse_workspace_document_background, doc.id, file_path)
+        
+        # 不返回绝对file_path
+        return {
+            "file_id": file_id,
+            "document_id": doc.id,
+            "original_filename": file.filename,
+            "file_size": file_size,
+            "message": "文档上传成功，正在后台解析",
+            "parse_status": doc.parse_status
+        }
+    except HTTPException:
+        await _safe_remove_workspace_file(file_path)
+        raise
+    except Exception as e:
+        await _safe_remove_workspace_file(file_path)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
 
 @router.get("/projects/{project_id}/documents")
-async def workspace_list_documents(project_id: int, db: Session = Depends(get_db)):
-    """获取项目文档列表"""
+async def workspace_list_documents(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取项目文档列表（不返回绝对file_path）"""
     docs = db.query(Document).filter(Document.project_id == project_id).order_by(desc(Document.created_at)).all()
     return {
         "items": [
@@ -1026,7 +1220,6 @@ async def workspace_list_documents(project_id: int, db: Session = Depends(get_db
                 "file_type": d.file_type,
                 "original_filename": d.original_filename,
                 "file_size": d.file_size,
-                "file_path": d.file_path,
                 "parse_status": d.parse_status,
                 "chunk_count": d.chunk_count or 0,
                 "table_count": d.table_count or 0,
@@ -1041,8 +1234,13 @@ async def workspace_list_documents(project_id: int, db: Session = Depends(get_db
 
 
 @router.get("/projects/{project_id}/documents/{document_id}")
-async def workspace_get_document(project_id: int, document_id: int, db: Session = Depends(get_db)):
-    """获取文档详情"""
+async def workspace_get_document(
+    project_id: int,
+    document_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取文档详情（不返回绝对file_path）"""
     doc = db.query(Document).filter(Document.id == document_id, Document.project_id == project_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -1065,8 +1263,13 @@ async def workspace_get_document(project_id: int, document_id: int, db: Session 
 
 
 @router.put("/projects/{project_id}/documents/{document_id}/set-report")
-async def workspace_set_report(project_id: int, document_id: int, db: Session = Depends(get_db)):
-    """标记文档为主报告（同时取消其他文档的主报告标记）"""
+async def workspace_set_report(
+    project_id: int,
+    document_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """标记文档为主报告"""
     doc = db.query(Document).filter(Document.id == document_id, Document.project_id == project_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -1080,7 +1283,12 @@ async def workspace_set_report(project_id: int, document_id: int, db: Session = 
 
 
 @router.put("/projects/{project_id}/documents/{document_id}/set-expert-opinion")
-async def workspace_set_expert_opinion(project_id: int, document_id: int, db: Session = Depends(get_db)):
+async def workspace_set_expert_opinion(
+    project_id: int,
+    document_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """标记文档为专家意见"""
     doc = db.query(Document).filter(Document.id == document_id, Document.project_id == project_id).first()
     if not doc:
@@ -1092,7 +1300,12 @@ async def workspace_set_expert_opinion(project_id: int, document_id: int, db: Se
 
 
 @router.delete("/projects/{project_id}/documents/{document_id}")
-async def workspace_delete_document(project_id: int, document_id: int, db: Session = Depends(get_db)):
+async def workspace_delete_document(
+    project_id: int,
+    document_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """删除文档（同时删除向量库中的chunks和文件）"""
     from app.services.vector_store import vector_store as vs
     
@@ -1102,16 +1315,16 @@ async def workspace_delete_document(project_id: int, document_id: int, db: Sessi
     
     # 删除向量
     try:
-        vs.delete_by_document(document_id)
+        await asyncio.to_thread(vs.delete_by_document, document_id)
     except Exception:
         pass
     
-    # 删除文件
-    try:
-        if doc.file_path and os.path.exists(doc.file_path):
-            os.remove(doc.file_path)
-    except Exception:
-        pass
+    # 删除文件（路径遍历防护）
+    if doc.file_path and _validate_path_within_uploads(doc.file_path):
+        try:
+            await asyncio.to_thread(os.remove, doc.file_path)
+        except Exception:
+            pass
     
     db.delete(doc)
     db.commit()
@@ -1119,7 +1332,11 @@ async def workspace_delete_document(project_id: int, document_id: int, db: Sessi
 
 
 @router.get("/projects/{project_id}/tasks")
-async def workspace_list_tasks(project_id: int, db: Session = Depends(get_db)):
+async def workspace_list_tasks(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取项目所有任务列表（5种任务类型汇总）"""
     tasks = []
     

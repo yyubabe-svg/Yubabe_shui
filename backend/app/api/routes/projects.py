@@ -1,16 +1,22 @@
 """项目管理API路由 - 替换原Mock数据"""
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from typing import List, Optional
-from pydantic import BaseModel
+import asyncio
 import os
 import uuid
 from datetime import datetime
+from typing import List, Optional
 
-from app.core.database import get_db
+import aiofiles
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Request
+from pydantic import BaseModel
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.database import get_db, SessionLocal
+from app.models.document import Document, ParseStatus, FileType
 from app.models.project import DesignProject, ProjectType, DesignStage, PROJECT_TYPE_NAMES, DESIGN_STAGE_NAMES
-from app.models.document import Document, ParseStatus
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user, check_feature_access
 from app.services.document_parser import document_parser
 
 
@@ -24,12 +30,13 @@ class ProjectCreate(BaseModel):
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "uploads")
+UPLOAD_DIR = settings.UPLOAD_DIR
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @router.get("")
 async def list_projects(
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db),
     project_type: Optional[str] = None,
     design_stage: Optional[str] = None,
@@ -101,6 +108,7 @@ async def list_projects(
 @router.post("")
 async def create_project(
     data: ProjectCreate,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """创建新项目"""
@@ -114,7 +122,7 @@ async def create_project(
         client=data.client,
         designer=data.designer,
         location=data.location,
-        created_by="system"
+        created_by=user.name
     )
     
     db.add(project)
@@ -130,7 +138,11 @@ async def create_project(
 
 
 @router.get("/{project_id}")
-async def get_project(project_id: int, db: Session = Depends(get_db)):
+async def get_project(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取项目详情"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
@@ -191,7 +203,12 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{project_id}")
-async def update_project(project_id: int, data: dict, db: Session = Depends(get_db)):
+async def update_project(
+    project_id: int,
+    data: dict,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """更新项目信息"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
@@ -215,7 +232,11 @@ async def update_project(project_id: int, data: dict, db: Session = Depends(get_
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: int, db: Session = Depends(get_db)):
+async def delete_project(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """删除项目（软删除）"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
@@ -227,12 +248,11 @@ async def delete_project(project_id: int, db: Session = Depends(get_db)):
 
 
 def _parse_document_background(document_id: int, file_path: str):
-    """后台解析文档"""
+    """后台解析文档（BackgroundTasks在线程池中运行，同步操作直接执行即可）"""
+    db = SessionLocal()
     try:
-        db = SessionLocal()
         doc = db.query(Document).filter(Document.id == document_id).first()
         if not doc:
-            db.close()
             return
         
         doc.parse_status = ParseStatus.PARSING.value
@@ -251,6 +271,7 @@ def _parse_document_background(document_id: int, file_path: str):
             # 存储chunks到数据库和向量库
             from app.services.vector_store import vector_store
             from app.models.document import Chunk
+            from app.services.embedding import embedding_service
             
             for i, chunk in enumerate(chunks):
                 db_chunk = Chunk(
@@ -270,13 +291,12 @@ def _parse_document_background(document_id: int, file_path: str):
             db_chunks = db.query(Chunk).filter(Chunk.document_id == document_id).order_by(Chunk.chunk_index).all()
             
             # 添加到向量库
-            from app.services.embedding import embedding_service
             texts = [c.chunk_text for c in db_chunks]
             if texts:
                 try:
                     embeddings = embedding_service.embed(texts)
                     vector_items = []
-                    for i, (db_chunk, emb) in enumerate(zip(db_chunks, embeddings)):
+                    for db_chunk, emb in zip(db_chunks, embeddings):
                         vector_items.append({
                             "id": f"chunk_{document_id}_{db_chunk.chunk_index}",
                             "embedding": emb,
@@ -296,14 +316,26 @@ def _parse_document_background(document_id: int, file_path: str):
                 except Exception as ve:
                     print(f"向量化失败: {ve}")
             
+            doc.chunk_count = len(db_chunks)
+            db.commit()
+            
         except Exception as e:
             print(f"文档解析失败: {e}")
             doc.parse_status = ParseStatus.FAILED.value
             db.commit()
-        
-        db.close()
     except Exception as e:
         print(f"后台解析任务异常: {e}")
+    finally:
+        db.close()
+
+
+async def _safe_remove_file(path: str):
+    """安全删除文件（异步）"""
+    if os.path.exists(path):
+        try:
+            await asyncio.to_thread(os.remove, path)
+        except Exception:
+            pass
 
 
 @router.post("/{project_id}/upload-report")
@@ -311,46 +343,104 @@ async def upload_project_report(
     project_id: int,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    request: Request = None,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """上传项目主报告"""
+    """上传项目主报告（aiofiles异步分块写入，移除.doc支持）"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
-    # 保存文件
-    ext = os.path.splitext(file.filename)[1]
-    filename = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    # 检查文件格式
+    ext = os.path.splitext(file.filename)[1].lower()
+    allowed_extensions = {'.pdf', '.docx', '.txt', '.md', '.markdown', '.xlsx', '.xls'}
+    if ext == '.doc':
+        raise HTTPException(status_code=400, detail=".doc格式不支持，请转换为.docx后再上传")
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
     
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # 生成唯一文件名
+    file_id = str(uuid.uuid4())
+    saved_filename = f"{file_id}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, saved_filename)
     
-    # 创建文档记录
-    from app.models.document import FileType
-    doc = Document(
-        title=file.filename,
-        file_type=FileType.PROJECT_REPORT.value,
-        file_path=file_path,
-        original_filename=file.filename,
-        file_size=len(content),
-        parse_status=ParseStatus.PENDING.value,
-        project_id=project_id
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
+    # 先检查Content-Length头部
+    content_length = 0
+    if request and "content-length" in request.headers:
+        try:
+            content_length = int(request.headers["content-length"])
+        except (ValueError, TypeError):
+            pass
     
-    # 添加后台解析任务
-    background_tasks.add_task(_parse_document_background, doc.id, file_path)
+    max_allowed = settings.PRO_MAX_FILE_SIZE if user.is_pro_active() else settings.FREE_MAX_FILE_SIZE
+    if content_length > 0 and content_length > max_allowed:
+        limit_mb = max_allowed // 1024 // 1024
+        raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
     
-    return {"document_id": doc.id, "message": "报告上传成功，正在后台解析"}
+    file_size = 0
+    try:
+        # 使用aiofiles异步分块写入
+        async with aiofiles.open(file_path, 'wb') as f:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                await f.write(chunk)
+                file_size += len(chunk)
+                if file_size > max_allowed:
+                    limit_mb = max_allowed // 1024 // 1024
+                    raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
+        
+        # 检查存储额度
+        if not settings.MOCK_MODE:
+            check = check_feature_access(user, "upload", file_size=file_size, db=db)
+            if not check.allowed:
+                await _safe_remove_file(file_path)
+                raise HTTPException(status_code=402, detail=check.reason)
+        
+        # 创建文档记录
+        doc = Document(
+            title=os.path.splitext(file.filename)[0],
+            file_type=FileType.PROJECT_REPORT.value,
+            file_path=file_path,
+            original_filename=file.filename,
+            file_size=file_size,
+            parse_status=ParseStatus.PENDING.value,
+            project_id=project_id,
+            upload_user=user.name,
+        )
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        
+        # 累加存储量
+        if not settings.MOCK_MODE:
+            user.total_upload_bytes += file_size
+            db.commit()
+        
+        # 添加后台解析任务
+        background_tasks.add_task(_parse_document_background, doc.id, file_path)
+        
+        return {
+            "file_id": file_id,
+            "document_id": doc.id,
+            "original_filename": file.filename,
+            "file_size": file_size,
+            "message": "报告上传成功，正在后台解析"
+        }
+    except HTTPException:
+        await _safe_remove_file(file_path)
+        raise
+    except Exception as e:
+        await _safe_remove_file(file_path)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
 
 @router.get("/{project_id}/documents")
-async def list_project_documents(project_id: int, db: Session = Depends(get_db)):
-    """获取项目文档列表"""
+async def list_project_documents(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取项目文档列表（不返回绝对file_path）"""
     docs = db.query(Document).filter(Document.project_id == project_id).order_by(desc(Document.created_at)).all()
     return {
         "items": [
@@ -363,6 +453,7 @@ async def list_project_documents(project_id: int, db: Session = Depends(get_db))
                 "parse_status": d.parse_status,
                 "table_count": d.table_count,
                 "total_pages": d.total_pages,
+                "chunk_count": d.chunk_count or 0,
                 "created_at": d.created_at.isoformat() if d.created_at else None,
             }
             for d in docs

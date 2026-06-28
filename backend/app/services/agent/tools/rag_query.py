@@ -44,14 +44,16 @@ class RAGQueryTool(BaseTool):
                     "file_name": meta.get("file_name", "未知文件"),
                     "page_number": meta.get("page_number", "未知页码"),
                     "chunk_index": meta.get("chunk_index", 0),
-                    "text": meta.get("text", "")[:500],
+                    # 修复3：兼容旧的"content" key和新的"text" key
+                    "text": (meta.get("text", "") or meta.get("content", ""))[:500],
                     "similarity": round(score, 3),
                 }
                 contexts.append(context_item)
                 references.append({
                     "file_name": meta.get("file_name", "未知文件"),
                     "page_number": meta.get("page_number"),
-                    "snippet": meta.get("text", "")[:200],
+                    # 修复3：兼容旧的"content" key和新的"text" key
+                    "snippet": (meta.get("text", "") or meta.get("content", ""))[:200],
                 })
             
             return ToolCallResult(

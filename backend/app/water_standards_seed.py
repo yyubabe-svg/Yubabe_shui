@@ -308,45 +308,76 @@ def get_standards_knowledge() -> list:
 
 
 def seed_standards_to_vector_store():
-    """将规范知识导入到向量库"""
+    """将规范知识导入到向量库（批量导入+幂等性检查）"""
     try:
         from app.services.embedding import embedding_service
         from app.services.vector_store import vector_store
         import hashlib
 
-        count = 0
+        # 修复1：统一元数据key为"text"（而非"content"），与其他地方保持一致
+        # 修复14：先收集所有向量和元数据，用add_batch一次性添加，避免每次add都全量写盘
+        # 修复14：添加幂等性检查，避免重复导入
+
+        items_to_add = []
+        skipped = 0
+
         for item in WATER_STANDARDS_DATA:
             # 生成唯一ID
             text = f"{item['code_number']}-{item['article']}-{item['content']}"
             doc_id = "std_" + hashlib.md5(text.encode('utf-8')).hexdigest()[:16]
 
+            # 幂等性检查：如果该ID已存在于向量库中则跳过
+            if doc_id in vector_store._vectors if hasattr(vector_store, '_vectors') else False:
+                skipped += 1
+                continue
+
             # 生成文本内容用于向量化
             content = f"【{item['code_name']}】{item['code_number']} {item['article']}：{item['content']}"
-            
-            # 生成向量
-            vector = embedding_service.embed_query(content)
-            
-            # 元数据
-            metadata = {
-                "type": "water_standard",
-                "code_name": item["code_name"],
-                "code_number": item["code_number"],
-                "article": item["article"],
-                "content": item["content"],
-                "keywords": ",".join(item["keywords"]),
-                "category": item["category"],
-                "file_name": f"{item['code_name']}({item['code_number']})",
-                "page_number": item["article"],
-                "source_type": "builtin_standard",
-            }
 
-            vector_store.add(doc_id, vector, metadata)
-            count += 1
+            items_to_add.append({
+                "id": doc_id,
+                "text_for_embed": content,
+                "metadata": {
+                    "type": "water_standard",
+                    "code_name": item["code_name"],
+                    "code_number": item["code_number"],
+                    "article": item["article"],
+                    "text": item["content"],  # 修复1：统一使用"text"而非"content"
+                    "keywords": ",".join(item["keywords"]),
+                    "category": item["category"],
+                    "file_name": f"{item['code_name']}({item['code_number']})",
+                    "page_number": item["article"],
+                    "source_type": "builtin_standard",
+                }
+            })
 
-        print(f"[Seed] 成功导入 {count} 条水利规范知识到向量库")
+        if not items_to_add:
+            if skipped > 0:
+                print(f"[Seed] 水利规范知识已存在（{skipped}条），跳过导入")
+            return skipped
+
+        # 批量向量化
+        texts = [item["text_for_embed"] for item in items_to_add]
+        embeddings = embedding_service.embed(texts)
+
+        # 批量添加到向量库
+        batch_items = []
+        for item, embedding in zip(items_to_add, embeddings):
+            batch_items.append({
+                "id": item["id"],
+                "embedding": embedding,
+                "metadata": item["metadata"],
+            })
+
+        vector_store.add_batch(batch_items)
+
+        count = len(batch_items)
+        print(f"[Seed] 成功导入 {count} 条水利规范知识到向量库" + (f"（跳过已存在 {skipped} 条）" if skipped else ""))
         return count
     except Exception as e:
         print(f"[Seed] 导入规范知识失败: {e}")
+        import traceback
+        traceback.print_exc()
         return 0
 
 

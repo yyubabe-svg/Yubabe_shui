@@ -14,7 +14,7 @@ const STORAGE_KEY = 'shushui_user'
 
 const api = axios.create({
   baseURL: getBaseURL(),
-  timeout: 120000, // 上传/解析可能需要较长时间
+  timeout: 300000, // 大文件上传/AI生成可能需要较长时间（5分钟）
   headers: {
     'Content-Type': 'application/json',
   },
@@ -47,7 +47,7 @@ export function clearUserName() {
 }
 
 // 获取用户名（优先localStorage，其次内存缓存）
-function getStoredUserName(): string | null {
+export function getStoredUserName(): string | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
@@ -65,16 +65,17 @@ function getStoredUserName(): string | null {
   return null
 }
 
-// 请求拦截器：自动添加 X-User-Name 头
+// 请求拦截器：自动添加 X-User-Name 头（URL编码以支持中文用户名）
 api.interceptors.request.use(
   (config) => {
     const name = getStoredUserName()
     console.log('[API] Request interceptor for', config.url, '- user name:', name)
     if (name) {
-      config.headers['X-User-Name'] = name
+      const encodedName = encodeURIComponent(name)
+      config.headers['X-User-Name'] = encodedName
       // 同时添加另一个header名以防代理过滤
-      config.headers['X-Username'] = name
-      console.log('[API] Headers set, X-User-Name:', name)
+      config.headers['X-Username'] = encodedName
+      console.log('[API] Headers set, X-User-Name (encoded):', encodedName)
     } else {
       console.warn('[API] No user name available for request:', config.url)
     }
@@ -113,13 +114,8 @@ api.interceptors.response.use(
     const url = error.config?.url || ''
 
     if (status === 401) {
-      // 只在明确需要登录的接口返回401时才触发登录页
-      // 支付接口401时给出提示即可，不要清除用户状态
-      const isAuthEndpoint = url.includes('/usage/register') || url.includes('/usage/status')
-      if (isAuthEndpoint) {
-        triggerAuthError(detail)
-      }
-      // 其他接口（如支付）的401只抛出错误，由组件处理，不清除登录状态
+      // 所有端点的401统一触发认证失败，清除用户状态并跳转登录
+      triggerAuthError(detail)
     } else if (status === 402) {
       // 需要付费升级
       triggerUpgrade(undefined, detail)

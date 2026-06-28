@@ -1,7 +1,9 @@
 import hashlib
+import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import unquote
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from sqlalchemy.orm import Session
 from app.core.database import get_db
@@ -11,6 +13,9 @@ from app.schemas.usage import (
     RegisterRequest, ActivateRequest, SetPinRequest,
     UsageResponse, FeatureCheckResponse,
 )
+
+# 用户名验证正则：允许中文、英文、数字、下划线，长度2-20
+USERNAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_]{2,20}$')
 
 router = APIRouter()
 
@@ -29,7 +34,15 @@ def get_current_user(
     user_name = x_user_name or x_username
     if not user_name or not user_name.strip():
         raise HTTPException(status_code=401, detail="未登录，请先输入姓名")
+    
+    # URL解码（处理中文用户名被URL编码的情况）
+    user_name = unquote(user_name)
+    # 去除首尾空格
     user_name = user_name.strip()
+    
+    # 用户名格式验证：只允许中文、英文、数字、下划线，长度2-20
+    if not USERNAME_PATTERN.match(user_name):
+        raise HTTPException(status_code=400, detail="用户名格式不正确，只允许中文、英文、数字、下划线，长度2-20位")
     
     user = db.query(UserUsage).filter(UserUsage.name == user_name).first()
     if not user:
@@ -152,6 +165,10 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
     name = req.name.strip()
     if not name or len(name) < 1:
         raise HTTPException(status_code=400, detail="请输入姓名")
+    
+    # 用户名格式验证
+    if not USERNAME_PATTERN.match(name):
+        raise HTTPException(status_code=400, detail="用户名格式不正确，只允许中文、英文、数字、下划线，长度2-20位")
 
     existing = db.query(UserUsage).filter(UserUsage.name == name).first()
 

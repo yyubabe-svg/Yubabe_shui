@@ -13,22 +13,29 @@ export function useAgentChat() {
   const [error, setError] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  const parseSSEEvents = (chunk: string): Array<{ event: string; data: any }> => {
+  // SSE事件解析器：正确处理\r\n、空行分隔符、不完整片段
+  const parseSSEEvents = (buffer: string): { events: Array<{ event: string; data: any }>; remaining: string } => {
     const events: Array<{ event: string; data: any }> = []
-    const lines = chunk.split('\n')
+    const lines = buffer.split('\n')
     let currentEvent = 'message'
     let currentData = ''
+    let i = 0
 
-    for (const line of lines) {
+    for (; i < lines.length - 1; i++) {
+      // 不处理最后一行（可能不完整）
+      let line = lines[i].replace(/\r$/, '') // 去除CRLF的\r
+
       if (line.startsWith('event:')) {
         currentEvent = line.slice(6).trim()
       } else if (line.startsWith('data:')) {
         currentData += line.slice(5).trim()
       } else if (line === '') {
+        // 空行 - 事件结束分隔符
         if (currentData) {
           try {
             events.push({ event: currentEvent, data: JSON.parse(currentData) })
-          } catch {
+          } catch (e) {
+            // 非JSON数据，作为纯文本推送
             events.push({ event: currentEvent, data: currentData })
           }
           currentData = ''
@@ -36,12 +43,10 @@ export function useAgentChat() {
         }
       }
     }
-    if (currentData) {
-      try {
-        events.push({ event: currentEvent, data: JSON.parse(currentData) })
-      } catch {}
-    }
-    return events
+
+    // 返回已处理的事件和剩余未处理的buffer
+    const remaining = lines.slice(i).join('\n')
+    return { events, remaining }
   }
 
   const sendMessage = useCallback(async (content: string) => {
@@ -58,6 +63,10 @@ export function useAgentChat() {
     setMessages(prev => [...prev, userMsg])
     setIsStreaming(true)
 
+    // 修复5：在sendMessage开头创建AbortController
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+
     let buffer = ''
     let assistantContent = ''
     const steps: ThinkingStep[] = []
@@ -65,7 +74,7 @@ export function useAgentChat() {
     let finalSources: Source[] = []
 
     try {
-      const response = await agentApi.chatStream(content.trim(), currentSessionId || undefined)
+      const response = await agentApi.chatStream(content.trim(), currentSessionId || undefined, abortController.signal)
 
       if (!response.ok || !response.body) {
         throw new Error(`请求失败: ${response.status}`)
@@ -80,13 +89,9 @@ export function useAgentChat() {
 
         buffer += decoder.decode(value, { stream: true })
 
-        // 处理完整的SSE事件
-        const events = parseSSEEvents(buffer)
-        // 保留最后不完整的部分
-        const lastNewline = buffer.lastIndexOf('\n\n')
-        if (lastNewline !== -1) {
-          buffer = buffer.slice(lastNewline + 2)
-        }
+        // 使用新的SSE解析器，正确维护buffer
+        const { events, remaining } = parseSSEEvents(buffer)
+        buffer = remaining
 
         for (const evt of events) {
           switch (evt.event) {
@@ -139,7 +144,7 @@ export function useAgentChat() {
         }
       }
 
-      // 添加AI回复
+      // 修复6：先添加最终AI消息，再清空streamingContent
       if (assistantContent) {
         const aiMsg: Message = {
           role: 'assistant',
@@ -148,12 +153,26 @@ export function useAgentChat() {
         }
         setMessages(prev => [...prev, aiMsg])
       }
+      setStreamingContent('')
     } catch (e: any) {
-      setError(e.message || '对话失败')
-      console.error('对话错误:', e)
+      if (e.name === 'AbortError') {
+        // 用户主动停止，将已有内容作为最终消息
+        if (assistantContent) {
+          const aiMsg: Message = {
+            role: 'assistant',
+            content: assistantContent,
+            tool_calls: usedTools.map(name => ({ name, arguments: {} })),
+          }
+          setMessages(prev => [...prev, aiMsg])
+        }
+      } else {
+        setError(e.message || '对话失败')
+        console.error('对话错误:', e)
+      }
     } finally {
       setIsStreaming(false)
       setStreamingContent('')
+      abortControllerRef.current = null
     }
   }, [currentSessionId, isStreaming])
 

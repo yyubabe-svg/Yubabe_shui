@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   ChevronLeft, LayoutDashboard, FolderOpen, FileText, Table,
   SearchCheck, Reply, Search, Loader2, Calculator, FolderSearch,
-  Map, Box, Waves, Ruler, Activity,
+  Map, Box, Waves, Ruler, Activity, Cuboid, Package,
 } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext'
 import { projectsApi } from '../../api/projects'
@@ -21,16 +21,19 @@ import CADPanel from './CADPanel'
 import HydroModelPanel from './HydroModelPanel'
 import ParametricDesignPanel from './ParametricDesignPanel'
 import DigitalTwinPanel from './DigitalTwinPanel'
+import Visual3DPanel from './Visual3DPanel'
+import ExportPanel from './ExportPanel'
 
 type TabKey = 'overview' | 'documents' | 'search' | 'section' | 'form' | 'review' | 'expert'
              | 'calc' | 'history' | 'gis' | 'cad'
              | 'hydro' | 'parametric' | 'twin'
+             | 'visual3d' | 'export'
 
 interface TabDef {
   key: TabKey
   label: string
   icon: typeof LayoutDashboard
-  group: 'core' | 'phase2' | 'phase3'
+  group: 'core' | 'phase2' | 'phase3' | 'phase4'
 }
 
 const TABS: TabDef[] = [
@@ -50,6 +53,9 @@ const TABS: TabDef[] = [
   { key: 'hydro',     label: '水文模型', icon: Waves,           group: 'phase3' },
   { key: 'parametric',label: '参数设计', icon: Ruler,           group: 'phase3' },
   { key: 'twin',      label: '项目看板', icon: Activity,        group: 'phase3' },
+  // 第四阶段功能
+  { key: 'visual3d',  label: '三维预览', icon: Cuboid,          group: 'phase4' },
+  { key: 'export',    label: '成果导出', icon: Package,         group: 'phase4' },
 ]
 
 export default function ProjectWorkspace() {
@@ -93,6 +99,7 @@ export default function ProjectWorkspace() {
   const coreTabs = TABS.filter(t => t.group === 'core')
   const phase2Tabs = TABS.filter(t => t.group === 'phase2')
   const phase3Tabs = TABS.filter(t => t.group === 'phase3')
+  const phase4Tabs = TABS.filter(t => t.group === 'phase4')
 
   return (
     <div className="page-container">
@@ -179,6 +186,28 @@ export default function ProjectWorkspace() {
               </button>
             )
           })}
+          {/* 分隔 - 第四阶段 */}
+          <div className="border-l border-neutral-200 mx-2 my-1.5" />
+          {phase4Tabs.map(tab => {
+            const Icon = tab.icon
+            const isActive = activeTab === tab.key
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm border-b-2 transition-colors whitespace-nowrap ${
+                  isActive
+                    ? 'border-cyan-600 text-cyan-700 font-medium'
+                    : 'border-transparent text-neutral-400 hover:text-neutral-700 hover:border-neutral-300'
+                }`}
+                title="第四阶段功能"
+              >
+                <Icon className="w-4 h-4" strokeWidth={1.75} />
+                {tab.label}
+                <span className="text-[10px] bg-cyan-100 text-cyan-600 px-1 rounded ml-0.5">新</span>
+              </button>
+            )
+          })}
         </nav>
       </div>
 
@@ -198,6 +227,8 @@ export default function ProjectWorkspace() {
         {activeTab === 'hydro' && <HydroModelPanel />}
         {activeTab === 'parametric' && <ParametricDesignPanel />}
         {activeTab === 'twin' && <DigitalTwinPanel />}
+        {activeTab === 'visual3d' && <Visual3DPanel />}
+        {activeTab === 'export' && <ExportPanel />}
       </div>
     </div>
   )

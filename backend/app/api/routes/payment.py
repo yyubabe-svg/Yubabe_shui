@@ -10,8 +10,10 @@
 import uuid
 import base64
 import os
+import mimetypes
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import unquote
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -83,6 +85,9 @@ async def create_order(
     """创建支付订单（用户不存在时自动创建）"""
     # 多种方式获取用户名：请求体 > X-User-Name header > X-Username header
     user_name = req.user_name or x_user_name or x_username
+    # URL解码中文用户名
+    if user_name:
+        user_name = unquote(user_name)
     # 打印调试信息
     print(f"[Payment] create-order called")
     print(f"[Payment] req.user_name='{req.user_name}', x_user_name='{x_user_name}', x_username='{x_username}'")
@@ -194,26 +199,52 @@ async def create_order(
     manual_qr_base64 = None
     if manual_payment and manual_qr_url:
         try:
-            # backend目录上一层就是项目根目录 shushui-ai
-            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-            project_root = os.path.dirname(backend_dir)  # shushui-ai
-            # 尝试多个可能的路径
-            possible_paths = [
-                os.path.join(project_root, "frontend", "public", manual_qr_url.lstrip("/")),
-                os.path.join(project_root, "frontend", "dist", manual_qr_url.lstrip("/")),
-                # 也尝试工作目录
-                os.path.join(os.getcwd(), "..", "frontend", "public", manual_qr_url.lstrip("/")),
-                os.path.join(os.getcwd(), "frontend", "public", manual_qr_url.lstrip("/")),
-            ]
-            print(f"[Payment] Looking for QR code, backend_dir={backend_dir}, project_root={project_root}")
+            # __file__ = backend/app/api/routes/payment.py
+            # 向上4级到 backend/，再向上1级到项目根目录 shushui-ai/
+            current_file = os.path.abspath(__file__)
+            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
+            project_root = os.path.dirname(backend_dir)  # shushui-ai/
+            qr_rel_path = manual_qr_url.lstrip("/")
+
+            # 构建可能的搜索路径列表
+            possible_paths = []
+            # 1. 可配置的二维码目录（环境变量QR_CODE_DIR设置）
+            if settings.QR_CODE_DIR:
+                possible_paths.append(os.path.join(settings.QR_CODE_DIR, qr_rel_path))
+            # 2. backend容器内 /app/qrcodes（Docker环境）
+            possible_paths.append(os.path.join("/app/qrcodes", qr_rel_path))
+            # 3. 裸机部署：项目根目录 frontend/public
+            possible_paths.append(os.path.join(project_root, "frontend", "public", qr_rel_path))
+            # 4. 裸机部署：项目根目录 frontend/dist（构建后）
+            possible_paths.append(os.path.join(project_root, "frontend", "dist", qr_rel_path))
+            # 5. 工作目录相对路径（兼容不同启动方式）
+            possible_paths.append(os.path.join(os.getcwd(), "frontend", "public", qr_rel_path))
+            possible_paths.append(os.path.join(os.getcwd(), "..", "frontend", "public", qr_rel_path))
+            # 6. backend目录下的qrcodes
+            possible_paths.append(os.path.join(backend_dir, "qrcodes", qr_rel_path))
+
+            print(f"[Payment] Looking for QR code, project_root={project_root}")
+            qr_data = None
+            qr_path_found = None
             for qr_path in possible_paths:
                 qr_path_norm = os.path.normpath(qr_path)
                 print(f"[Payment] Trying: {qr_path_norm}, exists: {os.path.isfile(qr_path_norm)}")
                 if os.path.isfile(qr_path_norm):
                     with open(qr_path_norm, "rb") as f:
                         qr_data = f.read()
-                    # 根据文件头（magic number）判断真实图片类型
-                    mime_type = "image/png"  # 默认
+                    qr_path_found = qr_path_norm
+                    break
+
+            if qr_data:
+                # 确定MIME类型：优先使用文件扩展名（mimetypes模块），再用magic number验证
+                mime_type = None
+                # 方法1: 根据文件扩展名判断
+                if qr_path_found:
+                    guessed = mimetypes.guess_type(qr_path_found)[0]
+                    if guessed and guessed.startswith("image/"):
+                        mime_type = guessed
+                # 方法2: 根据文件头（magic number）判断二进制图片格式
+                if not mime_type or mime_type == "application/octet-stream":
                     if qr_data[:2] == b'\xff\xd8':
                         mime_type = "image/jpeg"
                     elif qr_data[:8] == b'\x89PNG\r\n\x1a\n':
@@ -222,11 +253,18 @@ async def create_order(
                         mime_type = "image/gif"
                     elif qr_data[:4] == b'RIFF' and qr_data[8:12] == b'WEBP':
                         mime_type = "image/webp"
-                    manual_qr_base64 = f"data:{mime_type};base64," + base64.b64encode(qr_data).decode("utf-8")
-                    print(f"[Payment] QR code loaded! mime={mime_type}, size: {len(qr_data)} bytes")
-                    break
+                    elif b'<?xml' in qr_data[:200] or b'<svg' in qr_data[:300]:
+                        # SVG是XML文本格式，不以二进制文件头开头，检查XML/SVG标记
+                        mime_type = "image/svg+xml"
+                    else:
+                        mime_type = "image/png"  # 最终兜底
+
+                manual_qr_base64 = f"data:{mime_type};base64," + base64.b64encode(qr_data).decode("utf-8")
+                print(f"[Payment] QR code loaded! mime={mime_type}, size: {len(qr_data)} bytes, path: {qr_path_found}")
+            else:
+                print(f"[Payment] QR code file not found in any search path, will use URL fallback")
         except Exception as e:
-            print(f"[Payment] Failed to load QR code: {e}")
+            print(f"[Payment] Failed to load QR code as base64: {e}")
             import traceback
             traceback.print_exc()
 

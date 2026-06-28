@@ -129,16 +129,16 @@ export interface CadCheckResult {
 
 export interface GisAnalysisResult {
   success: boolean
+  limited?: boolean
   message?: string
   install_hint?: string
-  fallback?: any
   analysis_type: string
   file_count: number
   results: Array<{
     filename: string
     file_size: number
     ext: string
-    status: string
+    status: string  // 'processed' | 'limited' | 'error' | 'unsupported'
     feature_count?: number
     geometry_type?: string[]
     crs?: string

@@ -7,6 +7,7 @@ import {
 import { useProject } from '../../context/ProjectContext'
 import {
   workspaceApi,
+  triggerBlobDownload,
   type ProjectDocument,
   type ReviewIssue,
   type ReviewTaskDetail,
@@ -285,9 +286,8 @@ export default function AIReviewPanel() {
     if (!taskId) return
     setExporting(true)
     try {
-      const url = workspaceApi.exportReviewReport(taskId)
-      // 在新标签页打开下载
-      window.open(url, '_blank')
+      const { blob, contentDisposition } = await workspaceApi.exportReviewReport(taskId)
+      triggerBlobDownload(blob, 'AI审查报告.docx', contentDisposition)
     } catch (e: any) {
       setError(e?.response?.data?.detail || '导出失败')
     } finally {

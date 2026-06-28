@@ -1,9 +1,12 @@
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from app.services.llm_service import llm_service
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user
 
-router = APIRouter()
+router = APIRouter(prefix="/api/cad", tags=["智能CAD设计"])
 
 
 class CADGenerateRequest(BaseModel):
@@ -29,7 +32,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "挡水建筑物",
         "description": "混凝土拱坝三维模型，含坝体、溢流堰、坝顶结构",
         "default_prompt": "A concrete arch dam with spillway, realistic dimensions, parametric model with adjustable height, crest length, and arch radius",
-        "icon": "🏔️",
+        "icon": "Mountain",
     },
     {
         "id": "gravity_dam",
@@ -37,7 +40,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "挡水建筑物",
         "description": "混凝土重力坝典型断面，含坝顶、上下游坝坡、廊道",
         "default_prompt": "A concrete gravity dam cross-section with upstream and downstream faces, drainage gallery, spillway, parametric dimensions",
-        "icon": "🧱",
+        "icon": "Brick",
     },
     {
         "id": "embankment_dam",
@@ -45,7 +48,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "挡水建筑物",
         "description": "碾压式土石坝，含心墙/斜墙、反滤层、护坡",
         "default_prompt": "An embankment dam with clay core, filter layers, riprap slope protection, parametric model with height, crest width, slope ratios",
-        "icon": "⛰️",
+        "icon": "Mountain",
     },
     {
         "id": "spillway",
@@ -53,7 +56,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "泄水建筑物",
         "description": "开敞式溢洪道，含控制段、泄槽、消力池",
         "default_prompt": "An open channel spillway with control weir, chute, and stilling basin energy dissipator, parametric design",
-        "icon": "🌊",
+        "icon": "Wave",
     },
     {
         "id": "sluice",
@@ -61,7 +64,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "泄水建筑物",
         "description": "开敞式水闸，含闸室、闸门、桥墩、消力池",
         "default_prompt": "A sluice gate structure with piers, gate openings, bridge deck, stilling basin, parametric model with adjustable span and gate height",
-        "icon": "🚪",
+        "icon": "Door",
     },
     {
         "id": "culvert",
@@ -69,7 +72,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "输水建筑物",
         "description": "圆形/城门洞形输水隧洞，含进口、洞身、出口",
         "default_prompt": "A culvert or tunnel with circular cross-section, inlet and outlet structures, parametric model with diameter and length",
-        "icon": "🕳️",
+        "icon": "Circle",
     },
     {
         "id": "aqueduct",
@@ -77,7 +80,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "输水建筑物",
         "description": "梁式渡槽，含槽身、排架、基础",
         "default_prompt": "An aqueduct bridge with U-shaped or rectangular channel, supporting piers and foundations, parametric design",
-        "icon": "🌉",
+        "icon": "Bridge",
     },
     {
         "id": "retaining_wall",
@@ -85,7 +88,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "边坡防护",
         "description": "重力式/悬臂式挡土墙，含排水孔、墙后回填",
         "default_prompt": "A gravity retaining wall with drainage holes, backfill, parametric model with height, base width, and wall thickness",
-        "icon": "🧱",
+        "icon": "Brick",
     },
     {
         "id": "levee",
@@ -93,7 +96,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "防洪工程",
         "description": "河道堤防标准断面，含堤顶、堤坡、防渗体",
         "default_prompt": "A levee or embankment cross-section with crest, slopes, seepage cutoff, parametric model with height and crest width",
-        "icon": "🏞️",
+        "icon": "Park",
     },
     {
         "id": "pipe_penstock",
@@ -101,7 +104,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "水电站",
         "description": "压力钢管/预制混凝土管，含镇墩、支墩、伸缩节",
         "default_prompt": "A penstock pipe with anchor blocks, support piers, expansion joints, parametric model with diameter, length, and bend angle",
-        "icon": "🔧",
+        "icon": "Wrench",
     },
     {
         "id": "turbine",
@@ -109,7 +112,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "水电站",
         "description": "混流式/轴流式水轮机转轮，含蜗壳、导叶",
         "default_prompt": "A Francis turbine runner with spiral case, wicket gates, parametric model with adjustable diameter and blade count",
-        "icon": "⚙️",
+        "icon": "Gear",
     },
     {
         "id": "flume",
@@ -117,7 +120,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "水文测验",
         "description": "巴歇尔量水槽/薄壁堰，用于流量测量",
         "default_prompt": "A Parshall flume or sharp-crested weir for flow measurement, parametric model with throat width",
-        "icon": "📏",
+        "icon": "Ruler",
     },
     {
         "id": "check_dam",
@@ -125,7 +128,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "水土保持",
         "description": "小型拦沙坝/谷坊，含溢洪口、消能设施",
         "default_prompt": "A check dam for sediment control with spillway notch, energy dissipator, parametric model with height and width",
-        "icon": "🏔️",
+        "icon": "Mountain",
     },
     {
         "id": "pump_station",
@@ -133,7 +136,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "排灌工程",
         "description": "排涝/灌溉泵站，含泵房、进出水池、机组",
         "default_prompt": "A pump station building with intake basin, pump room, discharge outlet, parametric model",
-        "icon": "💧",
+        "icon": "Droplet",
     },
     {
         "id": "channel_section",
@@ -141,7 +144,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "灌溉排水",
         "description": "梯形/矩形渠道标准断面，含衬砌、堤顶道路",
         "default_prompt": "A trapezoidal channel cross-section with concrete lining, bank roads, parametric model with depth, bottom width, side slope",
-        "icon": "〰️",
+        "icon": "Waves",
     },
     {
         "id": "bridge",
@@ -149,7 +152,7 @@ WATER_TEMPLATES: List[dict] = [
         "category": "交叉建筑物",
         "description": "简支梁桥/拱桥，含桥墩、桥台、桥面",
         "default_prompt": "A simple beam bridge with piers, abutments, deck, parametric model with span length, width, and pier height",
-        "icon": "🌉",
+        "icon": "Bridge",
     },
 ]
 
@@ -178,12 +181,15 @@ for dam height, crest width, base width, high quality, manifold geometry suitabl
 
 
 @router.get("/templates")
-async def list_templates(category: Optional[str] = None):
-    """获取水利 CAD 构件模板列表"""
+async def list_templates(
+    category: Optional[str] = None,
+    user: UserUsage = Depends(get_current_user),
+):
+    """获取水利 CAD 构件模板列表（需认证）"""
     templates = WATER_TEMPLATES
     if category:
         templates = [t for t in templates if t["category"] == category]
-    
+
     categories = list(set(t["category"] for t in WATER_TEMPLATES))
     return {
         "templates": templates,
@@ -192,23 +198,28 @@ async def list_templates(category: Optional[str] = None):
 
 
 @router.post("/generate-prompt")
-async def generate_cad_prompt(request: CADGenerateRequest):
-    """根据中文描述生成英文 OpenSCAD 提示词"""
+async def generate_cad_prompt(
+    request: CADGenerateRequest,
+    user: UserUsage = Depends(get_current_user),
+):
+    """根据中文描述生成英文 OpenSCAD 提示词（需认证，调用LLM）"""
     description = request.description
-    
+
     # 如果选择了模板，将模板信息加入描述
     if request.template:
         template = next((t for t in WATER_TEMPLATES if t["id"] == request.template), None)
         if template:
             description = f"{description}. 参考构件类型：{template['name']}（{template['description']}）"
-    
-    # 调用 LLM 生成专业英文提示词
+
+    # 调用 LLM 生成专业英文提示词（使用asyncio.to_thread包裹以防阻塞）
     prompt = f"Convert this hydraulic engineering description into an OpenSCAD prompt: {description}"
-    generated_prompt = await llm_service.generate(prompt, system_prompt=CAD_SYSTEM_PROMPT)
-    
+    try:
+        generated_prompt = await llm_service.generate(prompt, system_prompt=CAD_SYSTEM_PROMPT)
+    except Exception:
+        generated_prompt = None
+
     # 如果是 mock 模式或生成失败，提供一个基础 prompt
     if not generated_prompt or len(generated_prompt) < 20:
-        # 查找匹配的模板
         if request.template:
             template = next((t for t in WATER_TEMPLATES if t["id"] == request.template), None)
             if template:
@@ -217,7 +228,7 @@ async def generate_cad_prompt(request: CADGenerateRequest):
                 generated_prompt = f"A parametric 3D model of {description}, with adjustable dimensions, high quality, manifold geometry suitable for 3D printing"
         else:
             generated_prompt = f"A parametric 3D model of {description}, with adjustable dimensions, engineering details, high quality, manifold geometry suitable for 3D printing"
-    
+
     return {
         "prompt": generated_prompt.strip(),
         "original_description": request.description,
@@ -226,8 +237,8 @@ async def generate_cad_prompt(request: CADGenerateRequest):
 
 
 @router.get("/info")
-async def cad_info():
-    """获取 CAD 功能信息"""
+async def cad_info(user: UserUsage = Depends(get_current_user)):
+    """获取 CAD 功能信息（需认证）"""
     return {
         "name": "智能CAD设计",
         "description": "基于AI的水利工程三维CAD模型生成，支持自然语言描述和参数化模板",

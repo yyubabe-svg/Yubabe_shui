@@ -253,12 +253,21 @@ export const phase3Api = {
     design_water_level: number
     bed_elevation: number
     bed_width: number
-    m_slope: number
+    m_slope?: number
     revetment_type: string
     freeboard: number
     crest_width: number
     berm_width?: number
     foundation_depth?: number
+    wall_thickness?: number
+    wall_bottom_thickness?: number
+    wall_height?: number
+    main_channel_width?: number
+    main_channel_depth?: number
+    floodplain_width?: number
+    m_slope_main?: number
+    m_slope_flood?: number
+    floodplain_revetment?: string
   }, projectId?: number) =>
     api.post<SectionDesignResult>('/phase3/parametric/design-section', params,
       { params: projectId ? { project_id: projectId } : {} }

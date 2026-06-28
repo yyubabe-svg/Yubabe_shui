@@ -338,6 +338,373 @@ def design_trapezoidal_section(
     )
 
 
+def design_rectangular_section(
+    design_water_level: float,
+    bed_elevation: float,
+    bed_width: float,
+    wall_height: float = 6.0,          # 挡墙高度
+    wall_thickness: float = 0.6,      # 挡墙顶宽
+    wall_bottom_thickness: float = 1.8, # 挡墙底宽（重力式）
+    revetment_type: str = "concrete",
+    freeboard: float = 1.0,
+    crest_width: float = 3.0,
+    foundation_depth: float = 1.0,
+) -> SectionDesignResult:
+    """矩形断面（重力式挡墙）参数化设计 - 适用于城镇段受限河道"""
+    warnings = []
+    compliance = []
+    notes = []
+
+    water_depth = design_water_level - bed_elevation
+    if water_depth <= 0:
+        return SectionDesignResult(
+            success=False, section_name="矩形断面", section_type="rectangular",
+            parameters={}, geometry={}, quantities={}, costs={}, stability={},
+            compliance=[], warnings=["设计水位必须高于河底高程"]
+        )
+
+    crest_elevation = design_water_level + freeboard
+    wall_total_height = wall_height + foundation_depth
+    rev = REVETMENT_PARAMS.get(revetment_type, REVETMENT_PARAMS["concrete"])
+
+    # 几何坐标点（对称矩形，左右重力式挡墙）
+    points = []
+    wall_base_half = wall_bottom_thickness / 2
+    # 左挡墙外缘（基础底）
+    points.append({"x": 0, "y": bed_elevation - foundation_depth})
+    # 左挡墙墙顶外缘
+    points.append({"x": wall_bottom_thickness - wall_thickness, "y": crest_elevation})
+    # 左挡墙墙顶内缘（迎水面）
+    points.append({"x": wall_bottom_thickness, "y": crest_elevation})
+    # 左墙脚（河底左端点）
+    points.append({"x": wall_bottom_thickness, "y": bed_elevation})
+    # 右墙脚（河底右端点）
+    points.append({"x": wall_bottom_thickness + bed_width, "y": bed_elevation})
+    # 右挡墙墙顶内缘
+    points.append({"x": wall_bottom_thickness + bed_width, "y": crest_elevation})
+    # 右挡墙墙顶外缘
+    points.append({"x": wall_bottom_thickness + bed_width + wall_thickness, "y": crest_elevation})
+    # 右挡墙外缘（基础底）
+    points.append({"x": wall_bottom_thickness*2 + bed_width, "y": bed_elevation - foundation_depth})
+
+    total_width = wall_bottom_thickness*2 + bed_width
+    section_height = wall_total_height
+
+    # 工程量（每延米）
+    # 挡墙混凝土体积（两侧重力式墙，梯形截面）
+    wall_area_per_side = (wall_thickness + wall_bottom_thickness) / 2 * wall_height
+    wall_volume_per_m = 2 * wall_area_per_side
+    # 基础混凝土
+    foundation_vol = 2 * wall_bottom_thickness * foundation_depth
+    # 河底护底
+    bed_protection = bed_width * 0.3
+    concrete_total = wall_volume_per_m + foundation_vol + bed_protection
+
+    # 土方开挖
+    excavation = total_width * foundation_depth * 1.2
+    # 墙后回填
+    backfill = (total_width - bed_width - wall_thickness*2) / 2 * wall_height * 0.5 * 2
+
+    # 水力要素
+    A = bed_width * water_depth
+    P = bed_width + 2 * water_depth
+    R = A / P if P > 0 else 0
+
+    # 抗滑稳定（重力墙，简化计算）
+    gamma_conc = 24
+    W_wall = wall_area_per_side * gamma_conc  # 单侧墙重 kN/m
+    F_water = 0.5 * 10 * water_depth ** 2
+    f = 0.55  # 混凝土与基岩摩擦系数
+    Kc = f * W_wall * 2 / F_water if F_water > 0 else 999
+    stability_ok = Kc >= 1.25
+
+    if stability_ok:
+        compliance.append(f"抗滑稳定安全系数 Kc={Kc:.2f} ≥ 1.25，满足规范要求")
+    else:
+        warnings.append(f"抗滑稳定安全系数 Kc={Kc:.2f} < 1.25，需加大墙底宽度或采取基础处理")
+
+    if wall_height > 6:
+        notes.append(f"墙高{wall_height}m超过6m，建议进行抗倾验算和地基承载力验算")
+
+    water_level_points = [
+        {"x": wall_bottom_thickness, "y": design_water_level},
+        {"x": wall_bottom_thickness + bed_width, "y": design_water_level},
+    ]
+    bed_points = [
+        {"x": wall_bottom_thickness, "y": bed_elevation},
+        {"x": wall_bottom_thickness + bed_width, "y": bed_elevation},
+    ]
+
+    concrete_cost = concrete_total * rev["cost_per_m3"]
+    backfill_cost = backfill * 35
+    excavation_cost = excavation * 25
+    total_cost = concrete_cost + backfill_cost + excavation_cost
+
+    return SectionDesignResult(
+        success=True,
+        section_name=f"{rev['name']}矩形断面（重力式挡墙）",
+        section_type=SectionType.RECTANGULAR.value,
+        parameters={
+            "bed_width": bed_width,
+            "wall_height": wall_height,
+            "wall_thickness": wall_thickness,
+            "wall_bottom_thickness": wall_bottom_thickness,
+            "water_depth": round(water_depth, 2),
+            "freeboard": freeboard,
+            "crest_width": crest_width,
+            "crest_elevation": round(crest_elevation, 2),
+            "revetment_type": revetment_type,
+            "revetment_name": rev["name"],
+            "revetment_thickness": rev["thickness_m"],
+            "foundation_depth": foundation_depth,
+        },
+        geometry={
+            "outline_points": points,
+            "water_level_points": water_level_points,
+            "bed_points": bed_points,
+            "section_width_m": round(total_width, 2),
+            "section_height_m": round(section_height, 2),
+        },
+        quantities={
+            "revetment_volume_m3_per_m": round(concrete_total, 3),
+            "fill_volume_m3_per_m": round(backfill, 3),
+            "foundation_volume_m3_per_m": round(foundation_vol, 3),
+            "excavation_m3_per_m": round(excavation, 3),
+            "concrete_or_stone_m3_per_m": round(concrete_total, 3),
+            "wetted_perimeter_m": round(P, 2),
+            "flow_area_m2": round(A, 2),
+            "hydraulic_radius_m": round(R, 2),
+        },
+        costs={
+            "revetment_cost_yuan_per_m": round(concrete_cost, 0),
+            "fill_cost_yuan_per_m": round(backfill_cost, 0),
+            "foundation_cost_yuan_per_m": round(excavation_cost, 0),
+            "total_cost_yuan_per_m": round(total_cost, 0),
+            "total_cost_yuan_per_km": round(total_cost * 1000, 0),
+        },
+        stability={
+            "anti_slide_Kc": round(Kc, 2),
+            "weight_kN_per_m": round(W_wall * 2, 1),
+            "water_pressure_kN_per_m": round(F_water, 1),
+            "friction_coeff": f,
+            "pass": stability_ok,
+        },
+        compliance=compliance + [f"堤顶超高 {freeboard}m，符合城镇段防洪要求"],
+        warnings=warnings,
+        notes=notes + [rev["notes"]],
+    )
+
+
+def design_compound_section(
+    design_water_level: float,
+    bed_elevation: float,
+    main_channel_width: float = 15,    # 主槽底宽
+    main_channel_depth: float = 3.5,   # 主槽深度
+    berm_elevation: float = None,      # 滩地高程（马道高程）
+    floodplain_width: float = 20,      # 单侧滩地宽度
+    m_slope_main: float = 2.0,         # 主槽边坡
+    m_slope_flood: float = 2.5,        # 滩地边坡
+    revetment_type: str = "stone_mortar",
+    floodplain_revetment: str = "grass",
+    freeboard: float = 1.0,
+    crest_width: float = 5.0,
+    foundation_depth: float = 0.6,
+) -> SectionDesignResult:
+    """复式断面（主槽+滩地）- 适用于天然河道"""
+    warnings = []
+    compliance = []
+    notes = []
+
+    if berm_elevation is None:
+        berm_elevation = bed_elevation + main_channel_depth
+
+    water_depth = design_water_level - bed_elevation
+    flood_depth = max(0, design_water_level - berm_elevation)
+    if water_depth <= 0:
+        return SectionDesignResult(
+            success=False, section_name="复式断面", section_type="compound",
+            parameters={}, geometry={}, quantities={}, costs={}, stability={},
+            compliance=[], warnings=["设计水位必须高于河底高程"]
+        )
+
+    crest_elevation = design_water_level + freeboard
+    rev_main = REVETMENT_PARAMS.get(revetment_type, REVETMENT_PARAMS["stone_mortar"])
+    rev_flood = REVETMENT_PARAMS.get(floodplain_revetment, REVETMENT_PARAMS["grass"])
+
+    # 几何坐标（对称复式断面）
+    points = []
+    x = 0
+    y = bed_elevation - foundation_depth
+    points.append({"x": x, "y": y})
+
+    # 左滩地外坡脚到堤顶（从基础到堤顶）
+    left_toe_to_crest_h = crest_elevation - (bed_elevation - foundation_depth)
+    x += m_slope_flood * left_toe_to_crest_h
+    y = crest_elevation
+    points.append({"x": x, "y": y})
+
+    # 左堤顶
+    points.append({"x": x + crest_width, "y": y})
+    x += crest_width
+
+    # 左堤内坡到滩地
+    d = crest_elevation - berm_elevation
+    x += m_slope_flood * d
+    y = berm_elevation
+    points.append({"x": x, "y": y})
+
+    # 左滩地（马道平台）
+    points.append({"x": x + floodplain_width, "y": y})
+    x += floodplain_width
+
+    # 主槽左坡
+    d2 = berm_elevation - bed_elevation
+    x += m_slope_main * d2
+    y = bed_elevation
+    points.append({"x": x, "y": y})
+
+    # 主槽底
+    points.append({"x": x + main_channel_width, "y": y})
+    x += main_channel_width
+
+    # 主槽右坡
+    x += m_slope_main * d2
+    y = berm_elevation
+    points.append({"x": x, "y": y})
+
+    # 右滩地
+    points.append({"x": x + floodplain_width, "y": y})
+    x += floodplain_width
+
+    # 右堤内坡
+    d3 = crest_elevation - berm_elevation
+    x += m_slope_flood * d3
+    y = crest_elevation
+    points.append({"x": x, "y": y})
+
+    # 右堤顶
+    points.append({"x": x + crest_width, "y": y})
+    x += crest_width
+
+    # 右堤外坡到基础
+    d4 = crest_elevation - (bed_elevation - foundation_depth)
+    x += m_slope_flood * d4
+    y = bed_elevation - foundation_depth
+    points.append({"x": x, "y": y})
+
+    total_width = x
+    section_height = crest_elevation - bed_elevation + foundation_depth
+
+    # 水力要素
+    # 主槽过流
+    A_main = (main_channel_width + m_slope_main * d2) * d2 if water_depth > d2 else (main_channel_width + m_slope_main * water_depth) * water_depth
+    # 滩地过流
+    A_flood = 0
+    if flood_depth > 0:
+        A_flood = 2 * floodplain_width * flood_depth
+    A = A_main + A_flood
+    P_main = main_channel_width + 2 * math.sqrt(1 + m_slope_main**2) * min(water_depth, d2)
+    P_flood = 2 * floodplain_width if flood_depth > 0 else 0
+    P = P_main + P_flood
+    R = A / P if P > 0 else 0
+
+    # 简化工程量
+    main_slope_len = d2 * math.sqrt(1 + m_slope_main**2)
+    flood_slope_len = (crest_elevation - berm_elevation) * math.sqrt(1 + m_slope_flood**2)
+    outer_slope_len = left_toe_to_crest_h * math.sqrt(1 + m_slope_flood**2)
+    rev_vol = 2 * (main_slope_len * rev_main["thickness_m"] + flood_slope_len * rev_flood["thickness_m"])
+    # 堤身填土
+    levee_fill = 2 * ((crest_width + (crest_width + m_slope_flood*d3))/2 * d3)
+    # 总造价估算
+    cost_main = main_slope_len * 2 * rev_main["thickness_m"] * rev_main["cost_per_m3"]
+    cost_flood = (flood_slope_len + outer_slope_len) * 2 * rev_flood["thickness_m"] * rev_flood["cost_per_m3"]
+    cost_fill = levee_fill * 35
+    total_cost = cost_main + cost_flood + cost_fill
+
+    # 抗滑稳定（简化）
+    gamma_fill = 18
+    W = levee_fill * gamma_fill
+    F_water = 0.5 * 10 * water_depth ** 2
+    f = 0.45
+    Kc = f * W / F_water if F_water > 0 else 999
+    stability_ok = Kc >= 1.25
+
+    water_level_points = [
+        {"x": points[5]["x"] - m_slope_main * max(0, berm_elevation - design_water_level), "y": design_water_level} if design_water_level <= berm_elevation else {"x": points[3]["x"], "y": design_water_level},
+        {"x": points[6]["x"] + m_slope_main * max(0, berm_elevation - design_water_level), "y": design_water_level} if design_water_level <= berm_elevation else {"x": points[9]["x"], "y": design_water_level},
+    ]
+    bed_points = [
+        {"x": points[5]["x"], "y": bed_elevation},
+        {"x": points[6]["x"], "y": bed_elevation},
+    ]
+
+    if flood_depth > 0:
+        notes.append(f"滩地过流深度{flood_depth:.1f}m，为复式断面典型特征")
+        compliance.append("复式断面满足主槽排常遇洪水、滩地排大洪水的要求")
+    if stability_ok:
+        compliance.append(f"抗滑稳定安全系数 Kc={Kc:.2f}")
+    else:
+        warnings.append(f"抗滑稳定安全系数 Kc={Kc:.2f}，不满足要求")
+
+    return SectionDesignResult(
+        success=True,
+        section_name=f"复式断面（主槽+滩地，{rev_main['name']}+{rev_flood['name']}）",
+        section_type=SectionType.COMPOUND.value,
+        parameters={
+            "main_channel_width": main_channel_width,
+            "main_channel_depth": main_channel_depth,
+            "berm_elevation": berm_elevation,
+            "floodplain_width": floodplain_width,
+            "m_slope_main": m_slope_main,
+            "m_slope_flood": m_slope_flood,
+            "bed_width": main_channel_width,
+            "water_depth": round(water_depth, 2),
+            "flood_depth": round(flood_depth, 2),
+            "freeboard": freeboard,
+            "crest_width": crest_width,
+            "crest_elevation": round(crest_elevation, 2),
+            "revetment_type": revetment_type,
+            "revetment_name": rev_main["name"],
+            "revetment_thickness": rev_main["thickness_m"],
+            "foundation_depth": foundation_depth,
+        },
+        geometry={
+            "outline_points": points,
+            "water_level_points": water_level_points,
+            "bed_points": bed_points,
+            "section_width_m": round(total_width, 2),
+            "section_height_m": round(section_height, 2),
+        },
+        quantities={
+            "revetment_volume_m3_per_m": round(rev_vol, 3),
+            "fill_volume_m3_per_m": round(levee_fill, 3),
+            "foundation_volume_m3_per_m": round(rev_vol * 0.2, 3),
+            "excavation_m3_per_m": round(total_width * foundation_depth * 0.5, 3),
+            "concrete_or_stone_m3_per_m": round(rev_vol, 3),
+            "wetted_perimeter_m": round(P, 2),
+            "flow_area_m2": round(A, 2),
+            "hydraulic_radius_m": round(R, 2),
+        },
+        costs={
+            "revetment_cost_yuan_per_m": round(cost_main + cost_flood, 0),
+            "fill_cost_yuan_per_m": round(cost_fill, 0),
+            "foundation_cost_yuan_per_m": round(rev_vol * 0.2 * rev_main["cost_per_m3"], 0),
+            "total_cost_yuan_per_m": round(total_cost, 0),
+            "total_cost_yuan_per_km": round(total_cost * 1000, 0),
+        },
+        stability={
+            "anti_slide_Kc": round(Kc, 2),
+            "weight_kN_per_m": round(W, 1),
+            "water_pressure_kN_per_m": round(F_water, 1),
+            "friction_coeff": f,
+            "pass": stability_ok,
+        },
+        compliance=compliance,
+        warnings=warnings,
+        notes=notes,
+    )
+
+
 def compare_schemes(schemes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     多方案对比
@@ -441,24 +808,53 @@ class ParametricDesignService:
                 berm_width=float(params.get("berm_width", 2.0)),
                 foundation_depth=float(params.get("foundation_depth", 0.6)),
             )
-            return {
-                "success": result.success,
-                "section_name": result.section_name,
-                "section_type": result.section_type,
-                "parameters": result.parameters,
-                "geometry": result.geometry,
-                "quantities": result.quantities,
-                "costs": result.costs,
-                "stability": result.stability,
-                "compliance": result.compliance,
-                "warnings": result.warnings,
-                "notes": result.notes,
-            }
+        elif section_type == SectionType.RECTANGULAR.value:
+            result = design_rectangular_section(
+                design_water_level=float(params.get("design_water_level", 100)),
+                bed_elevation=float(params.get("bed_elevation", 95)),
+                bed_width=float(params.get("bed_width", 8)),
+                wall_height=float(params.get("wall_height", 6.0)),
+                wall_thickness=float(params.get("wall_thickness", 0.6)),
+                wall_bottom_thickness=float(params.get("wall_bottom_thickness", 1.8)),
+                revetment_type=params.get("revetment_type", "concrete"),
+                freeboard=float(params.get("freeboard", 1.0)),
+                crest_width=float(params.get("crest_width", 3.0)),
+                foundation_depth=float(params.get("foundation_depth", 1.0)),
+            )
+        elif section_type == SectionType.COMPOUND.value:
+            result = design_compound_section(
+                design_water_level=float(params.get("design_water_level", 100)),
+                bed_elevation=float(params.get("bed_elevation", 95)),
+                main_channel_width=float(params.get("main_channel_width", 15)),
+                main_channel_depth=float(params.get("main_channel_depth", 3.5)),
+                floodplain_width=float(params.get("floodplain_width", 20)),
+                m_slope_main=float(params.get("m_slope_main", 2.0)),
+                m_slope_flood=float(params.get("m_slope_flood", 2.5)),
+                revetment_type=params.get("revetment_type", "stone_mortar"),
+                floodplain_revetment=params.get("floodplain_revetment", "grass"),
+                freeboard=float(params.get("freeboard", 1.0)),
+                crest_width=float(params.get("crest_width", 5.0)),
+                foundation_depth=float(params.get("foundation_depth", 0.6)),
+            )
         else:
             return {
                 "success": False,
-                "error": f"暂不支持 {section_type} 断面的参数化设计，目前仅支持梯形断面"
+                "error": f"不支持的断面类型: {section_type}"
             }
+
+        return {
+            "success": result.success,
+            "section_name": result.section_name,
+            "section_type": result.section_type,
+            "parameters": result.parameters,
+            "geometry": result.geometry,
+            "quantities": result.quantities,
+            "costs": result.costs,
+            "stability": result.stability,
+            "compliance": result.compliance,
+            "warnings": result.warnings,
+            "notes": result.notes,
+        }
 
     def compare_design_schemes(self, schemes: List[Dict[str, Any]]) -> Dict[str, Any]:
         """多方案对比"""

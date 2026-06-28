@@ -1,8 +1,12 @@
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 
-router = APIRouter()
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user
+
+router = APIRouter(prefix="/api/flood", tags=["防汛辅助"])
 
 
 class FloodQueryRequest(BaseModel):
@@ -37,30 +41,37 @@ MOCK_PLANS = [
 
 
 @router.get("/plans")
-async def list_plans(river_basin: Optional[str] = None, plan_type: Optional[str] = None):
-    """获取防汛预案列表"""
+async def list_plans(
+    river_basin: Optional[str] = None,
+    plan_type: Optional[str] = None,
+    user: UserUsage = Depends(get_current_user),
+):
+    """获取防汛预案列表（需认证）"""
     return {"plans": MOCK_PLANS}
 
 
 @router.post("/query")
-async def query_flood(request: FloodQueryRequest):
-    """防汛预案智能匹配"""
+async def query_flood(
+    request: FloodQueryRequest,
+    user: UserUsage = Depends(get_current_user),
+):
+    """防汛预案智能匹配（需认证，调用LLM）"""
     matched_plans = MOCK_PLANS
-    
+
     answer = f"【结论】根据您的查询\"{request.query}\"，匹配到以下预案：\n\n"
-    
+
     for plan in matched_plans:
-        answer += f"📋 {plan['plan_name']}\n"
+        answer += f"- {plan['plan_name']}\n"
         if "water_level_limit" in plan:
             answer += f"   {plan['water_level_limit']}\n"
         answer += "   关键规则：\n"
         for rule in plan.get("key_rules", []):
-            answer += f"   • {rule}\n"
+            answer += f"   - {rule}\n"
         answer += "\n"
-    
-    answer += "【风险提示】\n⚠️ 本系统仅提供辅助查询，最终调度决策应由防汛责任人确认。\n\n"
+
+    answer += "【风险提示】\n本系统仅提供辅助查询，最终调度决策应由防汛责任人确认。\n\n"
     answer += "【建议下一步】\n1. 立即报告防汛责任人\n2. 启动水情加密监测"
-    
+
     return {
         "answer": answer,
         "matched_plans": matched_plans,

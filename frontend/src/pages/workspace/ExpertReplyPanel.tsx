@@ -7,6 +7,7 @@ import {
 import { useProject } from '../../context/ProjectContext'
 import {
   workspaceApi,
+  triggerBlobDownload,
   type ProjectDocument,
   type ExpertReplyTaskDetail,
   type ExpertOpinionItem,
@@ -279,8 +280,8 @@ export default function ExpertReplyPanel() {
     if (!taskId) return
     setExporting(true)
     try {
-      const url = workspaceApi.exportReplyTable(taskId)
-      window.open(url, '_blank')
+      const { blob, contentDisposition } = await workspaceApi.exportReplyTable(taskId)
+      triggerBlobDownload(blob, '专家意见回复表.docx', contentDisposition)
     } catch (e: any) {
       setError(e?.response?.data?.detail || '导出失败')
     } finally {

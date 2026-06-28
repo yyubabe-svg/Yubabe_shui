@@ -5,6 +5,7 @@
 - 轻量数字孪生（项目KPI看板、设计进度可视化）
 """
 import os
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.project import DesignProject
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user
 from app.services.hydro_model_assistant import hydro_model_assistant
 from app.services.parametric_design import parametric_design_service
 from app.services.digital_twin import digital_twin_service
@@ -62,8 +65,8 @@ class SchemeCompareRequest(BaseModel):
 # ==================== 水文模型辅助接口 ====================
 
 @router.get("/hydro/models")
-async def list_hydro_models():
-    """获取支持的水文模型列表"""
+async def list_hydro_models(user: UserUsage = Depends(get_current_user)):
+    """获取支持的水文模型列表（需认证）"""
     return {
         "models": hydro_model_assistant.get_supported_models(),
         "supported_cities": [
@@ -74,9 +77,12 @@ async def list_hydro_models():
 
 
 @router.post("/hydro/rainfall/generate")
-async def generate_design_rainfall(req: RainfallGenRequest):
-    """生成设计暴雨（芝加哥雨型）"""
-    result = hydro_model_assistant.generate_rainfall(req.model_dump())
+async def generate_design_rainfall(
+    req: RainfallGenRequest,
+    user: UserUsage = Depends(get_current_user),
+):
+    """生成设计暴雨（芝加哥雨型，需认证）"""
+    result = await asyncio.to_thread(hydro_model_assistant.generate_rainfall, req.model_dump())
     if not result.success:
         raise HTTPException(status_code=400, detail=result.errors)
     return {
@@ -90,10 +96,14 @@ async def generate_design_rainfall(req: RainfallGenRequest):
 
 
 @router.post("/hydro/swmm/generate-inp")
-async def generate_swmm_inp(req: SwmmInpRequest, project_id: Optional[int] = None):
-    """生成SWMM .inp输入文件"""
+async def generate_swmm_inp(
+    req: SwmmInpRequest,
+    project_id: Optional[int] = None,
+    user: UserUsage = Depends(get_current_user),
+):
+    """生成SWMM .inp输入文件（需认证）"""
     params = req.model_dump()
-    result = hydro_model_assistant.generate_swmm_input(params)
+    result = await asyncio.to_thread(hydro_model_assistant.generate_swmm_input, params)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.errors)
     return {
@@ -110,15 +120,16 @@ async def generate_swmm_inp(req: SwmmInpRequest, project_id: Optional[int] = Non
 async def parse_swmm_rpt(
     file: UploadFile = File(...),
     project_id: Optional[int] = Query(None),
+    user: UserUsage = Depends(get_current_user),
 ):
-    """解析SWMM .rpt报告文件"""
+    """解析SWMM .rpt报告文件（需认证）"""
     content = await file.read()
     try:
         text = content.decode("utf-8", errors="ignore")
     except Exception:
         text = content.decode("gbk", errors="ignore")
 
-    result = hydro_model_assistant.parse_swmm_report(text)
+    result = await asyncio.to_thread(hydro_model_assistant.parse_swmm_report, text)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.errors)
     return {
@@ -136,16 +147,18 @@ async def parse_swmm_rpt(
 async def recommend_subcatchment_params(
     land_use: str = Query("residential"),
     area_ha: float = Query(1.0),
+    user: UserUsage = Depends(get_current_user),
 ):
-    """推荐子汇水区参数"""
-    return hydro_model_assistant.recommend_subcatchment_params(land_use, area_ha)
+    """推荐子汇水区参数（需认证）"""
+    return await asyncio.to_thread(hydro_model_assistant.recommend_subcatchment_params, land_use, area_ha)
 
 
 @router.get("/hydro/swmm/options")
-async def get_swmm_options():
-    """获取SWMM建模选项（用地类型、管材等）"""
-    data = hydro_model_assistant.generate_swmm_input(
-        project_name="__options__", subcatchments=[], junctions=[], conduits=[], outfalls=[]
+async def get_swmm_options(user: UserUsage = Depends(get_current_user)):
+    """获取SWMM建模选项（需认证）"""
+    data = await asyncio.to_thread(
+        hydro_model_assistant.generate_swmm_input,
+        dict(project_name="__options__", subcatchments=[], junctions=[], conduits=[], outfalls=[])
     )
     return {
         "land_use_options": data.data.get("land_use_options", []),
@@ -157,8 +170,11 @@ async def get_swmm_options():
 # ==================== 参数化设计接口 ====================
 
 @router.get("/parametric/options")
-async def get_parametric_options(building_level: int = Query(4)):
-    """获取参数化设计选项"""
+async def get_parametric_options(
+    building_level: int = Query(4),
+    user: UserUsage = Depends(get_current_user),
+):
+    """获取参数化设计选项（需认证）"""
     return {
         "section_types": parametric_design_service.get_section_types(),
         "revetment_types": parametric_design_service.get_revetment_types(),
@@ -167,33 +183,44 @@ async def get_parametric_options(building_level: int = Query(4)):
 
 
 @router.post("/parametric/design-section")
-async def design_section(req: SectionDesignRequest, project_id: Optional[int] = Query(None)):
-    """执行参数化断面设计"""
-    result = parametric_design_service.design_section(req.model_dump())
+async def design_section(
+    req: SectionDesignRequest,
+    project_id: Optional[int] = Query(None),
+    user: UserUsage = Depends(get_current_user),
+):
+    """执行参数化断面设计（需认证）"""
+    result = await asyncio.to_thread(parametric_design_service.design_section, req.model_dump())
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "设计失败"))
     return result
 
 
 @router.post("/parametric/compare")
-async def compare_schemes(req: SchemeCompareRequest):
-    """多方案对比"""
-    result = parametric_design_service.compare_design_schemes(req.schemes)
+async def compare_schemes(
+    req: SchemeCompareRequest,
+    user: UserUsage = Depends(get_current_user),
+):
+    """多方案对比（需认证）"""
+    result = await asyncio.to_thread(parametric_design_service.compare_design_schemes, req.schemes)
     return result
 
 
 # ==================== 轻量数字孪生接口 ====================
 
 @router.get("/digital-twin/dashboard/{project_id}")
-async def get_project_dashboard(project_id: int, db: Session = Depends(get_db)):
-    """获取项目数字孪生看板数据"""
+async def get_project_dashboard(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取项目数字孪生看板数据（需认证）"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    return digital_twin_service.get_dashboard(project)
+    return await asyncio.to_thread(digital_twin_service.get_dashboard, project)
 
 
 @router.get("/digital-twin/disciplines")
-async def get_disciplines():
-    """获取专业列表"""
+async def get_disciplines(user: UserUsage = Depends(get_current_user)):
+    """获取专业列表（需认证）"""
     return {"disciplines": digital_twin_service.get_disciplines()}

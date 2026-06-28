@@ -6,9 +6,17 @@ from app.core.database import SessionLocal
 from app.models.compliance import ComplianceChecklistTemplate, ComplianceCheckItem
 
 
-def init_compliance_templates():
-    """初始化合规初审检查表模板"""
-    db = SessionLocal()
+def init_compliance_templates(db=None):
+    """初始化合规初审检查表模板
+    
+    Args:
+        db: 可选的数据库Session，若为None则内部创建SessionLocal
+    """
+    own_session = False
+    if db is None:
+        from app.core.database import SessionLocal
+        db = SessionLocal()
+        own_session = True
     try:
         # 检查是否已有模板
         existing = db.query(ComplianceChecklistTemplate).count()
@@ -671,7 +679,8 @@ def init_compliance_templates():
         print(f"初始化失败: {e}")
         raise
     finally:
-        db.close()
+        if own_session:
+            db.close()
 
 
 if __name__ == "__main__":

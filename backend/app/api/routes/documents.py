@@ -1,4 +1,5 @@
 import os
+import asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -22,9 +23,10 @@ async def list_documents(
     keyword: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取文档列表（公开，知识库共享）"""
+    """获取文档列表（需登录）"""
     query = db.query(Document)
     
     if file_type:
@@ -58,8 +60,12 @@ async def list_documents(
 
 
 @router.get("/{doc_id}")
-async def get_document(doc_id: int, db: Session = Depends(get_db)):
-    """获取文档详情（公开）"""
+async def get_document(
+    doc_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取文档详情（需登录）"""
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -75,8 +81,12 @@ async def get_document(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/chunks")
-async def get_document_chunks(doc_id: int, db: Session = Depends(get_db)):
-    """获取文档分块（公开）"""
+async def get_document_chunks(
+    doc_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取文档分块（需登录）"""
     chunks = db.query(Chunk).filter(Chunk.document_id == doc_id).all()
     return [
         {
@@ -105,9 +115,9 @@ async def delete_document(
     # 删除向量
     vector_store.delete_by_document(doc_id)
     
-    # 删除物理文件
+    # 删除物理文件（修复12：使用asyncio.to_thread避免同步阻塞）
     if doc.file_path and os.path.exists(doc.file_path):
-        os.remove(doc.file_path)
+        await asyncio.to_thread(os.remove, doc.file_path)
     
     db.delete(doc)
     db.commit()
@@ -126,7 +136,7 @@ async def parse_document(
     user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """解析文档并入库（需登录，存储已在上传时累加）"""
+    """解析文档并入库（需登录，存储已在上传时累加）- 修复12：同步操作包裹在asyncio.to_thread中"""
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -137,58 +147,92 @@ async def parse_document(
     doc.parse_status = ParseStatus.PARSING.value
     db.commit()
     
-    try:
+    file_path = doc.file_path
+    doc_id_val = doc.id
+    doc_title = doc.title
+    doc_project_id = doc.project_id
+    doc_file_type = doc.file_type
+    
+    def _do_parse_and_embed():
+        """在线程中执行同步解析和向量化操作"""
         # 解析分块
-        chunks_data = document_parser.parse_and_chunk(doc.file_path, doc.id, doc.title)
+        chunks_data = document_parser.parse_and_chunk(file_path, doc_id_val, doc_title)
         
-        # 删除旧的chunks和向量
-        db.query(Chunk).filter(Chunk.document_id == doc.id).delete()
-        vector_store.delete_by_document(doc_id)
-        db.commit()
-        
-        # 保存chunks
-        texts_to_embed = []
-        saved_chunks = []
-        
-        for chunk_data in chunks_data:
-            chunk = Chunk(**chunk_data)
-            db.add(chunk)
-            saved_chunks.append(chunk)
-            texts_to_embed.append(chunk_data["chunk_text"])
-        
-        db.flush()
-        
-        # 向量化
-        embeddings = embedding_service.embed(texts_to_embed)
-        
-        vector_items = []
-        for chunk, embedding in zip(saved_chunks, embeddings):
-            vector_id = f"chunk_{chunk.id}"
-            chunk.embedding_id = vector_id
-            vector_items.append({
-                "id": vector_id,
-                "embedding": embedding,
-                "metadata": {
-                    "document_id": doc_id,
-                    "project_id": doc.project_id,
-                    "file_type": doc.file_type,
-                    "chunk_id": chunk.id,
-                    "file_name": doc.title,
-                    "page_number": chunk.page_number,
-                    "section_title": chunk.section_title,
-                    "chapter_path": chunk.chapter_path,
-                    "text": chunk.chunk_text[:200],
-                },
-            })
-        
-        vector_store.add_batch(vector_items)
-        
-        doc.parse_status = ParseStatus.COMPLETED.value
-        doc.chunk_count = len(saved_chunks)
-        db.commit()
-        
-        return {"message": "解析完成", "chunk_count": len(saved_chunks)}
+        # 保存chunks到数据库（需要新session，因为在不同线程中）
+        from app.core.database import SessionLocal
+        thread_db = SessionLocal()
+        try:
+            # 删除旧的chunks和向量
+            thread_db.query(Chunk).filter(Chunk.document_id == doc_id_val).delete()
+            vector_store.delete_by_document(doc_id_val)
+            thread_db.commit()
+            
+            saved_chunks = []
+            texts_to_embed = []
+            
+            for chunk_data in chunks_data:
+                chunk = Chunk(**chunk_data)
+                thread_db.add(chunk)
+                saved_chunks.append(chunk)
+                texts_to_embed.append(chunk_data["chunk_text"])
+            
+            thread_db.flush()
+            
+            # 向量化
+            embeddings = embedding_service.embed(texts_to_embed)
+            
+            vector_items = []
+            for chunk, embedding in zip(saved_chunks, embeddings):
+                vector_id = f"chunk_{chunk.id}"
+                chunk.embedding_id = vector_id
+                vector_items.append({
+                    "id": vector_id,
+                    "embedding": embedding,
+                    "metadata": {
+                        "document_id": doc_id_val,
+                        "project_id": doc_project_id,
+                        "file_type": doc_file_type,
+                        "chunk_id": chunk.id,
+                        "file_name": doc_title,
+                        "page_number": chunk.page_number,
+                        "section_title": chunk.section_title,
+                        "chapter_path": chunk.chapter_path,
+                        "text": chunk.chunk_text[:200],
+                    },
+                })
+            
+            vector_store.add_batch(vector_items)
+            
+            # 更新文档状态
+            thread_doc = thread_db.query(Document).filter(Document.id == doc_id_val).first()
+            if thread_doc:
+                thread_doc.parse_status = ParseStatus.COMPLETED.value
+                thread_doc.chunk_count = len(saved_chunks)
+            
+            thread_db.commit()
+            return len(saved_chunks)
+        except Exception as e:
+            thread_db.rollback()
+            # 更新失败状态
+            try:
+                thread_doc = thread_db.query(Document).filter(Document.id == doc_id_val).first()
+                if thread_doc:
+                    thread_doc.parse_status = ParseStatus.FAILED.value
+                thread_db.commit()
+            except Exception:
+                pass
+            raise e
+        finally:
+            thread_db.close()
+    
+    try:
+        chunk_count = await asyncio.to_thread(_do_parse_and_embed)
+        return {"message": "解析完成", "chunk_count": chunk_count}
     except Exception as e:
-        doc.parse_status = ParseStatus.FAILED.value
-        db.commit()
+        # 确保文档状态被更新为失败（兜底）
+        try:
+            doc.parse_status = ParseStatus.FAILED.value
+            db.commit()
+        except Exception:
+            db.rollback()
         raise HTTPException(status_code=500, detail=f"解析失败: {str(e)}")

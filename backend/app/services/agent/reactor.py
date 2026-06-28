@@ -115,11 +115,28 @@ class ReActEngine:
 
             # ---- 有工具调用 -> 执行 Action ----
             if response.tool_calls:
+                # 修复9：先统一生成工具调用ID，确保assistant消息和tool结果中的ID一致
+                tool_call_ids = [
+                    f"call_{step}_{idx}_{uuid.uuid4().hex[:8]}"
+                    for idx in range(len(response.tool_calls))
+                ]
+                
+                # 修复9：先将assistant消息（含tool_calls）写入记忆
+                memory.add_assistant_message(
+                    response.content,
+                    tool_calls=[
+                        {"id": tool_call_ids[idx],
+                         "name": tc.name,
+                         "arguments": json.dumps(tc.arguments, ensure_ascii=False)}
+                        for idx, tc in enumerate(response.tool_calls)
+                    ]
+                )
+                
                 for idx, tool_call in enumerate(response.tool_calls):
                     tool_name = tool_call.name
                     tool_args = tool_call.arguments
-                    # 为每次工具调用生成唯一 id，避免多工具同轮冲突
-                    tool_call_id = f"call_{step}_{idx}_{uuid.uuid4().hex[:8]}"
+                    # 使用预生成的唯一ID
+                    tool_call_id = tool_call_ids[idx]
 
                     # 发送 tool_call 事件
                     await self._emit(event_queue, "tool_call", {

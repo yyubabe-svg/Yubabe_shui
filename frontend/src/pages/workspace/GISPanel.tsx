@@ -181,20 +181,35 @@ export default function GISPanel() {
         <div className="space-y-4">
           <div className="panel p-5">
             <h3 className="text-sm font-semibold text-neutral-900 mb-3 flex items-center gap-2">
-              {result.success ? (
+              {result.limited ? (
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+              ) : result.success ? (
                 <CheckCircle2 className="w-4 h-4 text-green-600" />
               ) : (
-                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <AlertTriangle className="w-4 h-4 text-red-600" />
               )}
-              分析结果（{result.file_count}个文件）
+              {result.limited ? '基础文件信息（GIS降级模式）' : '分析结果'}（{result.file_count}个文件）
             </h3>
 
-            {!result.success && result.message && (
+            {/* 降级模式提示 */}
+            {result.limited && result.message && (
               <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 mb-4">
-                {result.message}
+                <p className="font-medium">⚠️ {result.message}</p>
                 {result.install_hint && (
-                  <p className="text-xs mt-1 font-mono bg-white px-2 py-1 rounded mt-2">{result.install_hint}</p>
+                  <p className="text-xs mt-2 font-mono bg-white px-2 py-1.5 rounded border border-amber-100">
+                    {result.install_hint}
+                  </p>
                 )}
+                <p className="text-xs mt-2 text-amber-600">
+                  安装依赖后重启后端服务即可启用完整空间分析功能（坡度/汇水/淹没分析等）。
+                </p>
+              </div>
+            )}
+
+            {/* 错误提示（非limited模式下的失败） */}
+            {!result.limited && !result.success && result.message && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 mb-4">
+                {result.message}
               </div>
             )}
 
@@ -208,9 +223,14 @@ export default function GISPanel() {
                         {(r.file_size / 1024).toFixed(1)} KB · {r.ext.toUpperCase()} ·
                         <span className={`ml-1 ${
                           r.status === 'processed' ? 'text-green-600' :
-                          r.status === 'error' ? 'text-red-600' : 'text-neutral-500'
+                          r.status === 'error' ? 'text-red-600' :
+                          r.status === 'limited' ? 'text-amber-600' :
+                          r.status === 'unsupported' ? 'text-neutral-400' : 'text-neutral-500'
                         }`}>
-                          {r.status === 'processed' ? '已分析' : r.status === 'error' ? '分析失败' : r.status}
+                          {r.status === 'processed' ? '已分析' :
+                           r.status === 'error' ? '分析失败' :
+                           r.status === 'limited' ? '基础信息' :
+                           r.status === 'unsupported' ? '不支持' : r.status}
                         </span>
                       </p>
                     </div>
@@ -218,6 +238,13 @@ export default function GISPanel() {
 
                   {r.status === 'error' && r.error && (
                     <p className="text-xs text-red-600 bg-red-50 p-2 rounded">{r.error}</p>
+                  )}
+
+                  {r.status === 'limited' && (
+                    <div className="p-3 bg-amber-50 border border-amber-100 rounded text-xs text-amber-700">
+                      <p>📄 文件已成功接收（大小 {(r.file_size / 1024).toFixed(1)} KB，格式 {r.ext.toUpperCase()}）</p>
+                      <p className="mt-1">{r.message || 'GIS依赖未安装，未执行空间分析。'}</p>
+                    </div>
                   )}
 
                   {r.status === 'unsupported' && r.message && (

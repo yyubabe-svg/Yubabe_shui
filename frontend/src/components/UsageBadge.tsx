@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Crown, LogOut, ChevronUp, User } from 'lucide-react'
+import { Crown, LogOut, ChevronUp, ChevronDown, User, Sparkles } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 
 function formatBytes(bytes: number): string {
@@ -23,11 +23,7 @@ export default function UsageBadge() {
     <div className="px-3 py-3 border-t border-neutral-200 relative">
       <button
         onClick={() => {
-          if (!isPro) {
-            openUpgrade()
-          } else {
-            setShowMenu(!showMenu)
-          }
+          setShowMenu(!showMenu)
         }}
         className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md transition-colors text-left ${
           isPro
@@ -59,37 +55,65 @@ export default function UsageBadge() {
             )}
           </div>
         </div>
-        {isPro && (
-          <ChevronUp className={`w-3.5 h-3.5 flex-shrink-0 text-neutral-400 transition-transform ${showMenu ? '' : 'rotate-180'}`} />
+        {showMenu ? (
+          <ChevronUp className={`w-3.5 h-3.5 flex-shrink-0 text-neutral-400`} />
+        ) : (
+          <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 text-neutral-400`} />
         )}
       </button>
 
-      {/* Pro 用户下拉菜单 */}
-      {isPro && showMenu && (
-        <div className="absolute bottom-full left-3 right-3 mb-1 bg-white border border-neutral-200 rounded-md shadow-lg overflow-hidden">
-          <div className="px-3 py-2.5 border-b border-neutral-100">
-            <div className="text-xs text-neutral-500">存储使用</div>
-            <div className="mt-1 h-1.5 bg-neutral-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-brand-500 rounded-full"
-                style={{ width: `${Math.min(100, (user.total_upload_bytes / user.total_storage_limit) * 100)}%` }}
-              />
+      {/* 下拉菜单（免费用户和Pro用户都可用） */}
+      {showMenu && (
+        <div className="absolute bottom-full left-3 right-3 mb-1 bg-white border border-neutral-200 rounded-md shadow-lg overflow-hidden z-10">
+          {/* 免费用户显示升级入口 */}
+          {!isPro && (
+            <>
+              <div className="px-3 py-2.5 border-b border-neutral-100">
+                <div className="text-xs text-neutral-500 mb-1">今日使用</div>
+                <div className="text-xs text-neutral-700">问答剩余 {user.daily_qa_remaining} 次</div>
+                <div className="mt-1.5 h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-brand-500 rounded-full"
+                    style={{ width: `${Math.min(100, (user.total_upload_bytes / user.total_storage_limit) * 100)}%` }}
+                  />
+                </div>
+                <div className="text-[11px] text-neutral-400 mt-1">{storageUsed} / {storageLimit}</div>
+              </div>
+              <button
+                onClick={() => { setShowMenu(false); openUpgrade() }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-brand-600 hover:bg-brand-50 transition-colors border-b border-neutral-100"
+              >
+                <Sparkles className="w-3.5 h-3.5" strokeWidth={1.75} />
+                升级 Pro 版
+              </button>
+            </>
+          )}
+          {/* Pro用户显示存储信息 */}
+          {isPro && (
+            <div className="px-3 py-2.5 border-b border-neutral-100">
+              <div className="text-xs text-neutral-500">存储使用</div>
+              <div className="mt-1 h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-brand-500 rounded-full"
+                  style={{ width: `${Math.min(100, (user.total_upload_bytes / user.total_storage_limit) * 100)}%` }}
+                />
+              </div>
+              <div className="text-[11px] text-neutral-400 mt-1">{storageUsed} / {storageLimit}</div>
             </div>
-            <div className="text-[11px] text-neutral-400 mt-1">{storageUsed} / {storageLimit}</div>
-          </div>
+          )}
           <button
             onClick={() => { setShowMenu(false); logout() }}
             className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-600 hover:bg-neutral-50 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" strokeWidth={1.75} />
-            切换账号
+            退出登录
           </button>
         </div>
       )}
 
       {/* 点击外部关闭菜单 */}
       {showMenu && (
-        <div className="fixed inset-0 z-[-1]" onClick={() => setShowMenu(false)} />
+        <div className="fixed inset-0 z-0" onClick={() => setShowMenu(false)} />
       )}
     </div>
   )

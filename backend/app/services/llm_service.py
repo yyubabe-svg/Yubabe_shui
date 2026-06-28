@@ -126,20 +126,31 @@ class LLMService:
             return self._mock_generate(prompt)
         
         if self.provider in ("openai", "volcano"):
-            return await self._generate_completions(prompt, system_prompt)
+            try:
+                return await self._generate_completions(prompt, system_prompt)
+            except Exception as e:
+                # 修复4：非mock模式下打印详细错误并返回明确错误消息，不返回假答案
+                import traceback
+                print(f"[LLM] generate 调用失败 (provider={self.provider}): {e}")
+                traceback.print_exc()
+                return "AI服务暂时不可用，请稍后重试。"
         else:
-            return self._mock_generate(prompt)
+            # 修复4：未知provider不再静默mock，返回错误提示
+            print(f"[LLM] 未知的 LLM_PROVIDER: {self.provider}")
+            return "AI服务配置错误，请联系管理员。"
     
     async def rag_query(self, question: str, retrieved_chunks: List[Dict[str, Any]]) -> str:
         """RAG 问答"""
         context = self._format_context(retrieved_chunks)
-        prompt = RAG_PROMPT_TEMPLATE.format(question=question, context=context)
+        # 修复4：str.format()在用户输入含花括号时会报错，改用字符串替换（使用安全占位符）
+        prompt = RAG_PROMPT_TEMPLATE.replace("{question}", question).replace("{context}", context)
         return await self.generate(prompt)
     
     async def review_document(self, document_content: str, retrieved_chunks: List[Dict[str, Any]]) -> str:
         """合规审查"""
         context = self._format_context(retrieved_chunks)
-        prompt = REVIEW_PROMPT_TEMPLATE.format(document_content=document_content, context=context)
+        # 修复4：str.format()在用户输入含花括号时会报错，改用字符串替换
+        prompt = REVIEW_PROMPT_TEMPLATE.replace("{document_content}", document_content).replace("{context}", context)
         return await self.generate(prompt)
     
     # ------------------------------------------------------------------
@@ -171,9 +182,14 @@ class LLMService:
                 stream=False,
             )
         except Exception as e:
-            print(f"chat API 调用失败，fallback 到 mock: {e}")
-            last_user_msg = self._extract_last_user_content(messages)
-            return self._mock_generate(last_user_msg)
+            # 修复4：非mock模式下不再静默fallback到假答案，而是打印详细错误并返回明确错误消息
+            import traceback
+            print(f"[LLM] chat API 调用失败 (provider={self.provider}): {e}")
+            traceback.print_exc()
+            if self.mock_mode or self.provider == "mock":
+                last_user_msg = self._extract_last_user_content(messages)
+                return self._mock_generate(last_user_msg)
+            return "AI服务暂时不可用，请稍后重试。"
     
     async def chat_stream(
         self,
@@ -203,12 +219,18 @@ class LLMService:
             ):
                 yield chunk
         except Exception as e:
-            print(f"chat_stream API 调用失败，fallback 到 mock 流式: {e}")
-            last_user_msg = self._extract_last_user_content(messages)
-            mock_text = self._mock_generate(last_user_msg)
-            for ch in mock_text:
-                yield ch
-                await asyncio.sleep(0.01)
+            # 修复4：流式中断时yield错误提示，而不是继续yield mock假文本
+            import traceback
+            print(f"[LLM] chat_stream API 调用失败 (provider={self.provider}): {e}")
+            traceback.print_exc()
+            if self.mock_mode or self.provider == "mock":
+                last_user_msg = self._extract_last_user_content(messages)
+                mock_text = self._mock_generate(last_user_msg)
+                for ch in mock_text:
+                    yield ch
+                    await asyncio.sleep(0.01)
+            else:
+                yield "\n\n[错误] AI服务暂时不可用，请稍后重试。"
     
     async def chat_with_tools(
         self,
@@ -231,8 +253,14 @@ class LLMService:
                 temperature=temperature,
             )
         except Exception as e:
-            print(f"chat_with_tools API 调用失败，fallback 到 mock: {e}")
-            return await self._mock_chat_with_tools(messages, tools)
+            # 修复4：非mock模式下不再静默fallback到假数据，打印详细错误并向上传播或返回错误
+            import traceback
+            print(f"[LLM] chat_with_tools API 调用失败 (provider={self.provider}): {e}")
+            traceback.print_exc()
+            if self.mock_mode or self.provider == "mock":
+                return await self._mock_chat_with_tools(messages, tools)
+            # 非mock模式：抛出异常让上层（如reactor）处理错误
+            raise
     
     # ------------------------------------------------------------------
     # Mock 逻辑
@@ -966,8 +994,13 @@ class LLMService:
         try:
             return await self._chat_api(messages=messages)
         except Exception as e:
-            print(f"{self.provider} API 调用失败: {e}")
-            return self._mock_generate(prompt)
+            # 修复4：_generate_completions不再静默fallback到mock
+            import traceback
+            print(f"[LLM] {self.provider} API 调用失败: {e}")
+            traceback.print_exc()
+            if self.mock_mode or self.provider == "mock":
+                return self._mock_generate(prompt)
+            raise  # 向上传播异常
     
     async def _generate_openai(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """兼容旧调用（保留）"""
@@ -1015,7 +1048,9 @@ class LLMService:
         for i, chunk in enumerate(chunks, 1):
             part = f"[{i}] 文件：{chunk.get('file_name', '未知')}\n"
             part += f"页码：{chunk.get('page_number', '未知')}\n"
-            part += f"内容：{chunk.get('text', '')[:500]}\n"
+            # 修复4：兼容旧的"content" key和新的"text" key
+            chunk_text = chunk.get('text', '') or chunk.get('content', '')
+            part += f"内容：{chunk_text[:500]}\n"
             context_parts.append(part)
         return "\n---\n".join(context_parts)
 

@@ -5,22 +5,26 @@
 - GIS一键出图（基于开源GIS工具）
 - CAD图纸检查（DXF解析、图签识别、目录生成）
 """
+import asyncio
 import os
 import math
 import uuid
 import json
+import datetime
+import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, and_, func
 from typing import Optional, List
 from pydantic import BaseModel
-import datetime
 
 from app.core.database import get_db
 from app.models.project import DesignProject, ProjectType, PROJECT_TYPE_NAMES
 from app.models.document import Document
 from app.models.calc_history import CalcHistory
+from app.models.user_usage import UserUsage
+from app.api.routes.usage import get_current_user
 from app.services.hydraulic_calculator import hydraulic_calculator, calc_result_to_dict
 
 router = APIRouter(prefix="/api/tools", tags=["第二阶段工具"])
@@ -65,10 +69,11 @@ async def list_calc_types():
 async def run_calculation(
     data: CalcRequest,
     project_id: Optional[int] = None,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """执行一次水利计算"""
-    result = hydraulic_calculator.calculate(data.calc_type, data.params)
+    result = await asyncio.to_thread(hydraulic_calculator.calculate, data.calc_type, data.params)
     result_dict = calc_result_to_dict(result)
 
     # 保存历史记录
@@ -76,6 +81,7 @@ async def run_calculation(
     if data.save and result.success:
         record = CalcHistory(
             project_id=project_id,
+            user_name=user.name,
             calc_type=data.calc_type,
             calc_name=result.calc_name,
             category=next((t["category"] for t in hydraulic_calculator.get_calc_types() if t["id"] == data.calc_type), ""),
@@ -103,10 +109,11 @@ async def list_calc_history(
     project_id: Optional[int] = None,
     calc_type: Optional[str] = None,
     limit: int = 50,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """查询计算历史"""
-    q = db.query(CalcHistory)
+    """查询计算历史（按用户过滤）"""
+    q = db.query(CalcHistory).filter(CalcHistory.user_name == user.name)
     if project_id:
         q = q.filter(CalcHistory.project_id == project_id)
     if calc_type:
@@ -134,9 +141,16 @@ async def list_calc_history(
 
 
 @router.get("/calc/history/{history_id}")
-async def get_calc_history(history_id: int, db: Session = Depends(get_db)):
+async def get_calc_history(
+    history_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取单条计算历史详情"""
-    h = db.query(CalcHistory).filter(CalcHistory.id == history_id).first()
+    h = db.query(CalcHistory).filter(
+        CalcHistory.id == history_id,
+        CalcHistory.user_name == user.name
+    ).first()
     if not h:
         raise HTTPException(status_code=404, detail="计算记录不存在")
     return {
@@ -159,9 +173,16 @@ async def get_calc_history(history_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/calc/history/{history_id}")
-async def delete_calc_history(history_id: int, db: Session = Depends(get_db)):
+async def delete_calc_history(
+    history_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """删除计算记录"""
-    h = db.query(CalcHistory).filter(CalcHistory.id == history_id).first()
+    h = db.query(CalcHistory).filter(
+        CalcHistory.id == history_id,
+        CalcHistory.user_name == user.name
+    ).first()
     if not h:
         raise HTTPException(status_code=404, detail="计算记录不存在")
     db.delete(h)
@@ -181,6 +202,7 @@ async def find_similar_projects(
     project_type_name_keyword: Optional[str] = None,
     exclude_project_id: Optional[int] = None,
     limit: int = 10,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -265,6 +287,7 @@ async def find_similar_projects(
 async def recommend_for_project(
     project_id: int,
     limit: int = 6,
+    user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """为指定项目智能推荐相似历史项目"""
@@ -288,7 +311,11 @@ async def recommend_for_project(
 
 
 @router.get("/history/reuse-materials/{project_id}")
-async def get_project_reuse_materials(project_id: int, db: Session = Depends(get_db)):
+async def get_project_reuse_materials(
+    project_id: int,
+    user: UserUsage = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """获取历史项目可复用资料清单（文档、章节、计算、表格）"""
     project = db.query(DesignProject).filter(DesignProject.id == project_id).first()
     if not project:
@@ -335,17 +362,21 @@ async def get_project_reuse_materials(project_id: int, db: Session = Depends(get
 @router.post("/cad/check-drawings")
 async def check_cad_drawings(
     files: List[UploadFile] = File(...),
+    user: UserUsage = Depends(get_current_user),
 ):
     """
     批量检查CAD图纸
     解析DXF文件图签，检查图号连续性、图名缺失、日期/专业/负责人一致性
     返回图纸目录清单和问题列表
     """
+    import re as _re
+    from collections import Counter
+
     results = []
     issues = []
 
     for idx, file in enumerate(files):
-        ext = os.path.splitext(file.filename)[1].lower()
+        ext = os.path.splitext(file.filename or "")[1].lower()
         if ext not in [".dxf"]:
             issues.append({
                 "file": file.filename,
@@ -359,17 +390,32 @@ async def check_cad_drawings(
             })
             continue
 
-        # 保存文件
+        # 使用UUID文件名 + aiofiles异步分块写入
         safe_name = f"{uuid.uuid4()}{ext}"
         file_path = os.path.join(UPLOAD_DIR, safe_name)
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        # 路径遍历防护
+        upload_dir_real = os.path.realpath(UPLOAD_DIR)
+        file_path_real = os.path.realpath(file_path)
+        if not file_path_real.startswith(upload_dir_real + os.sep):
+            issues.append({
+                "file": file.filename,
+                "severity": "error",
+                "message": "非法文件路径",
+            })
+            continue
 
-        # 解析DXF（使用ezdxf）
+        file_size = 0
+        async with aiofiles.open(file_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                await f.write(chunk)
+                file_size += len(chunk)
+                if file_size > 50 * 1024 * 1024:
+                    raise HTTPException(status_code=400, detail="文件大小超过限制(50MB)")
+
+        # 解析DXF（在后台线程中执行同步操作）
         drawing_info = {
             "filename": file.filename,
-            "file_size": len(content),
+            "file_size": file_size,
             "drawing_number": None,
             "drawing_name": None,
             "scale": None,
@@ -385,84 +431,91 @@ async def check_cad_drawings(
             "parse_status": "parsed",
         }
 
+        def _parse_dxf(path):
+            """在后台线程中同步解析DXF"""
+            info = {}
+            try:
+                import ezdxf
+                doc = ezdxf.readfile(path)
+                msp = doc.modelspace()
+
+                all_texts = []
+                for entity in msp:
+                    if entity.dxftype() == "TEXT":
+                        txt = entity.dxf.text.strip()
+                        if txt:
+                            all_texts.append(txt)
+                    elif entity.dxftype() == "MTEXT":
+                        txt = entity.text.strip()
+                        if txt:
+                            all_texts.append(txt)
+
+                block_refs = [e for e in msp if e.dxftype() == "INSERT"]
+                info["texts_found"] = len(all_texts)
+                info["blocks_found"] = len(block_refs)
+
+                full_text = "\n".join(all_texts)
+
+                dn_match = _re.search(r"(?:图\s*号|编\s*号|图\s*别)\s*[:：]?\s*([A-Za-z0-9\-—/]+)", full_text)
+                if dn_match:
+                    info["drawing_number"] = dn_match.group(1).strip()
+                else:
+                    dn_match2 = _re.search(r"\b([A-Z]{1,3}[\-—]\s*\d{1,3}(?:[\-—]\d{1,3})?)\b", full_text)
+                    if dn_match2:
+                        info["drawing_number"] = dn_match2.group(1).strip()
+
+                name_match = _re.search(r"(?:图\s*名|名\s*称)\s*[:：]?\s*([^\n]{2,30})", full_text)
+                if name_match:
+                    info["drawing_name"] = name_match.group(1).strip()
+                else:
+                    chinese_texts = [t for t in all_texts if len(t) >= 4 and _re.search(r"[\u4e00-\u9fa5]", t)]
+                    if chinese_texts:
+                        info["drawing_name"] = max(chinese_texts, key=len)[:30]
+
+                scale_match = _re.search(r"(?:比\s*例|SCALE)\s*[:：]?\s*([0-9]+\s*[:：]\s*[0-9]+)", full_text, _re.IGNORECASE)
+                if scale_match:
+                    info["scale"] = scale_match.group(1).replace(" ", "")
+
+                date_match = _re.search(r"(20\d{2})[\.\-/年](\d{1,2})[\.\-/月](\d{1,2})", full_text)
+                if date_match:
+                    info["date"] = f"{date_match.group(1)}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+
+                role_map = {"设计": "designer", "制图": "designer", "校核": "reviewer", "审核": "reviewer",
+                            "审查": "chief", "审定": "chief", "项目负责人": "chief"}
+                for role_cn, role_en in role_map.items():
+                    m = _re.search(rf"{role_cn}\s*[:：]?\s*([\u4e00-\u9fa5]{{2,4}})", full_text)
+                    if m and not info.get(role_en):
+                        info[role_en] = m.group(1).strip()
+
+                major_match = _re.search(r"(?:专\s*业)\s*[:：]?\s*([\u4e00-\u9fa5]{2,5})", full_text)
+                if major_match:
+                    info["major"] = major_match.group(1).strip()
+
+                info["parse_status"] = "parsed"
+            except ImportError:
+                info["parse_status"] = "ezdxf_not_installed"
+                info["warnings"] = ["未安装ezdxf库，无法解析DXF；建议运行 pip install ezdxf"]
+            except Exception as e:
+                info["parse_status"] = "error"
+                info["error"] = str(e)
+            return info
+
         try:
-            import ezdxf
-            doc = ezdxf.readfile(file_path)
-            msp = doc.modelspace()
+            parsed = await asyncio.to_thread(_parse_dxf, file_path)
+            drawing_info.update(parsed)
 
-            # 收集所有TEXT/MTEXT实体
-            all_texts = []
-            for entity in msp:
-                if entity.dxftype() == "TEXT":
-                    txt = entity.dxf.text.strip()
-                    if txt:
-                        all_texts.append(txt)
-                elif entity.dxftype() == "MTEXT":
-                    txt = entity.text.strip()
-                    if txt:
-                        all_texts.append(txt)
-
-            # 收集块引用数
-            block_refs = [e for e in msp if e.dxftype() == "INSERT"]
-            drawing_info["texts_found"] = len(all_texts)
-            drawing_info["blocks_found"] = len(block_refs)
-
-            # 简单启发式提取图签信息
-            # 图号通常是"图号"、"图别"或"编号"后面的文本，或者是S-01、SS-01等格式
-            import re
-            full_text = "\n".join(all_texts)
-
-            # 图号匹配：图号 XX-XX 或 图号：XX 或 编号：XX
-            dn_match = re.search(r"(?:图\s*号|编\s*号|图\s*别)\s*[:：]?\s*([A-Za-z0-9\-—/]+)", full_text)
-            if dn_match:
-                drawing_info["drawing_number"] = dn_match.group(1).strip()
-            else:
-                # 匹配结尾的编号格式，如 S-01、水施-03
-                dn_match2 = re.search(r"\b([A-Z]{1,3}[\-—]\s*\d{1,3}(?:[\-—]\d{1,3})?)\b", full_text)
-                if dn_match2:
-                    drawing_info["drawing_number"] = dn_match2.group(1).strip()
-
-            # 图名：通常在标题栏中间位置较大文字，简化：找"图名"后面的文字
-            name_match = re.search(r"(?:图\s*名|名\s*称)\s*[:：]?\s*([^\n]{2,30})", full_text)
-            if name_match:
-                drawing_info["drawing_name"] = name_match.group(1).strip()
-            else:
-                # 若没有明确标记，取长度较长的中文文本作为候选
-                chinese_texts = [t for t in all_texts if len(t) >= 4 and re.search(r"[\u4e00-\u9fa5]", t)]
-                if chinese_texts:
-                    drawing_info["drawing_name"] = max(chinese_texts, key=len)[:30]
-
-            # 比例
-            scale_match = re.search(r"(?:比\s*例|SCALE)\s*[:：]?\s*([0-9]+\s*[:：]\s*[0-9]+)", full_text, re.IGNORECASE)
-            if scale_match:
-                drawing_info["scale"] = scale_match.group(1).replace(" ", "")
-
-            # 日期
-            date_match = re.search(r"(20\d{2})[\.\-/年](\d{1,2})[\.\-/月](\d{1,2})", full_text)
-            if date_match:
-                drawing_info["date"] = f"{date_match.group(1)}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
-
-            # 设计/校核/审查
-            role_map = {"设计": "designer", "制图": "designer", "校核": "reviewer", "审核": "reviewer",
-                        "审查": "chief", "审定": "chief", "项目负责人": "chief"}
-            for role_cn, role_en in role_map.items():
-                m = re.search(rf"{role_cn}\s*[:：]?\s*([\u4e00-\u9fa5]{2,4})", full_text)
-                if m and not drawing_info.get(role_en):
-                    drawing_info[role_en] = m.group(1).strip()
-
-            # 专业
-            major_match = re.search(r"(?:专\s*业)\s*[:：]?\s*([\u4e00-\u9fa5]{2,5})", full_text)
-            if major_match:
-                drawing_info["major"] = major_match.group(1).strip()
-
-        except ImportError:
-            drawing_info["parse_status"] = "ezdxf_not_installed"
-            drawing_info["warnings"] = ["未安装ezdxf库，无法解析DXF；建议运行 pip install ezdxf"]
-            issues.append({
-                "file": file.filename,
-                "severity": "warning",
-                "message": "ezdxf库未安装，返回基本文件信息",
-            })
+            if drawing_info["parse_status"] == "ezdxf_not_installed":
+                issues.append({
+                    "file": file.filename,
+                    "severity": "warning",
+                    "message": "ezdxf库未安装，返回基本文件信息",
+                })
+            elif drawing_info["parse_status"] == "error":
+                issues.append({
+                    "file": file.filename,
+                    "severity": "error",
+                    "message": f"DXF解析失败：{drawing_info.get('error', '')[:100]}",
+                })
         except Exception as e:
             drawing_info["parse_status"] = "error"
             drawing_info["error"] = str(e)
@@ -477,7 +530,7 @@ async def check_cad_drawings(
         # 清理临时文件
         try:
             os.remove(file_path)
-        except:
+        except Exception:
             pass
 
     # 一致性检查
@@ -486,7 +539,7 @@ async def check_cad_drawings(
     for r in results:
         if r.get("drawing_number"):
             # 尝试提取末尾数字
-            num_match = re.search(r"(\d+)\s*$", r["drawing_number"])
+            num_match = _re.search(r"(\d+)\s*$", r["drawing_number"])
             if num_match:
                 numbers.append((r["drawing_number"], int(num_match.group(1)), r["filename"]))
     numbers.sort(key=lambda x: x[1])
@@ -513,7 +566,6 @@ async def check_cad_drawings(
     for field in ["date", "designer", "reviewer", "chief", "major"]:
         values = [r.get(field) for r in results if r.get(field)]
         if len(values) >= max(2, len(results) // 2):
-            from collections import Counter
             most_common = Counter(values).most_common(1)[0]
             if most_common[1] < len(values):
                 inconsistent = [r["filename"] for r in results if r.get(field) and r[field] != most_common[0]]
@@ -585,105 +637,158 @@ async def list_cad_check_templates():
 async def gis_analyze(
     files: List[UploadFile] = File(...),
     analysis_type: str = Query("basic", description="分析类型: basic(基础统计), slope(坡度), watershed(汇水), flood(淹没)"),
+    user: UserUsage = Depends(get_current_user),
 ):
     """
     GIS空间分析（轻量版：基于GeoPandas/Rasterio）
     上传SHP/ZIP/GeoJSON/DEM数据，返回分析结果和图件
+    当GIS依赖未安装时，降级为文件基础信息返回模式
     """
-    try:
-        import geopandas as gpd
-        import json as json_mod
-    except ImportError:
-        return {
-            "success": False,
-            "message": "GIS依赖未安装",
-            "install_hint": "pip install geopandas rasterio shapely pyproj",
-            "fallback": {
-                "analysis_type": analysis_type,
-                "note": "当前环境未安装GIS库，返回文件基础信息。安装后可进行坡度/汇水/淹没等分析。"
-            }
-        }
+    def _check_gis_deps():
+        try:
+            import geopandas as gpd
+            return True
+        except ImportError:
+            return False
+
+    gis_ok = await asyncio.to_thread(_check_gis_deps)
 
     results = []
     output_dir = os.path.join(EXPORT_DIR, "gis", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(output_dir, exist_ok=True)
+    if gis_ok:
+        os.makedirs(output_dir, exist_ok=True)
 
     for file in files:
-        ext = os.path.splitext(file.filename)[1].lower()
+        ext = os.path.splitext(file.filename or "")[1].lower()
         safe_name = f"{uuid.uuid4()}{ext}"
         file_path = os.path.join(UPLOAD_DIR, safe_name)
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+
+        # 路径遍历防护
+        upload_dir_real = os.path.realpath(UPLOAD_DIR)
+        file_path_real = os.path.realpath(file_path)
+        if not file_path_real.startswith(upload_dir_real + os.sep):
+            results.append({
+                "filename": file.filename,
+                "status": "error",
+                "error": "非法文件路径",
+            })
+            continue
+
+        # aiofiles异步分块写入（无论GIS是否可用都保存文件）
+        file_size = 0
+        save_error = None
+        try:
+            async with aiofiles.open(file_path, "wb") as f:
+                while chunk := await file.read(1024 * 1024):
+                    await f.write(chunk)
+                    file_size += len(chunk)
+                    if file_size > 100 * 1024 * 1024:
+                        raise HTTPException(status_code=400, detail="文件大小超过限制(100MB)")
+        except Exception as e:
+            save_error = str(e)[:200]
 
         info = {
             "filename": file.filename,
-            "file_size": len(content),
+            "file_size": file_size,
             "ext": ext,
-            "status": "processed",
         }
 
-        try:
-            if ext in [".shp", ".geojson", ".json", ".zip", ".gpkg"]:
-                gdf = gpd.read_file(file_path)
-                info["feature_count"] = len(gdf)
-                info["geometry_type"] = list(gdf.geom_type.unique()) if len(gdf) > 0 else []
-                info["crs"] = str(gdf.crs) if gdf.crs else None
-                info["bounds"] = list(gdf.total_bounds) if len(gdf) > 0 else None
-                info["columns"] = list(gdf.columns)
+        if save_error:
+            info["status"] = "error"
+            info["error"] = f"文件保存失败: {save_error}"
+            results.append(info)
+            # 清理可能存在的不完整文件
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+            continue
 
-                # 计算面积/长度（若是多边形/线）
-                if len(gdf) > 0:
-                    # 转换为等积投影计算面积
-                    try:
-                        gdf_proj = gdf.to_crs(epsg=3857) if gdf.crs else gdf
-                        if any(gdf.geom_type.str.contains("Polygon")):
-                            info["area_km2"] = round(gdf_proj.geometry.area.sum() / 1e6, 4)
-                        if any(gdf.geom_type.str.contains("LineString")):
-                            info["length_km"] = round(gdf_proj.geometry.length.sum() / 1000, 4)
-                    except:
-                        pass
+        if not gis_ok:
+            # 降级模式：GIS依赖未安装，仅返回文件基础信息
+            info["status"] = "limited"
+            info["message"] = "GIS依赖库未安装，仅返回基础文件信息"
+            results.append(info)
+            # 清理临时文件（降级模式不保留文件进行分析）
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+            continue
 
-                # 属性表前5行预览
-                info["attribute_preview"] = gdf.head(5).drop(columns=["geometry"], errors="ignore").to_dict(orient="records")
+        # GIS可用：执行完整分析
+        info["status"] = "processed"
 
-            elif ext in [".tif", ".tiff", ".dem", ".asc"]:
-                import rasterio
-                from rasterio.warp import transform_bounds
-                with rasterio.open(file_path) as src:
-                    info["raster_width"] = src.width
-                    info["raster_height"] = src.height
-                    info["crs"] = str(src.crs)
-                    info["bounds"] = list(src.bounds)
-                    info["resolution"] = list(src.res)
-                    info["band_count"] = src.count
-                    band1 = src.read(1, masked=True)
-                    info["min_value"] = float(band1.min()) if band1.count() > 0 else None
-                    info["max_value"] = float(band1.max()) if band1.count() > 0 else None
-                    info["mean_value"] = float(band1.mean()) if band1.count() > 0 else None
+        def _analyze_gis(path, fext, atype):
+            """在后台线程中同步执行GIS分析"""
+            res = {}
+            try:
+                import geopandas as gpd
+                if fext in [".shp", ".geojson", ".json", ".zip", ".gpkg"]:
+                    gdf = gpd.read_file(path)
+                    res["feature_count"] = len(gdf)
+                    res["geometry_type"] = list(gdf.geom_type.unique()) if len(gdf) > 0 else []
+                    res["crs"] = str(gdf.crs) if gdf.crs else None
+                    res["bounds"] = list(gdf.total_bounds) if len(gdf) > 0 else None
+                    res["columns"] = list(gdf.columns)
 
-                    if analysis_type == "slope":
+                    if len(gdf) > 0:
                         try:
-                            import numpy as np
-                            # 简化坡度计算（度）
-                            dy, dx = np.gradient(band1.filled(0), src.res[0], src.res[1])
-                            slope = np.degrees(np.arctan(np.sqrt(dx * dx + dy * dy)))
-                            info["slope_min"] = float(slope.min())
-                            info["slope_max"] = float(slope.max())
-                            info["slope_mean"] = float(slope.mean())
-                            # 坡度分级
-                            info["slope_classes"] = {
-                                "0-5°(平地)": float((slope < 5).sum() / slope.size * 100),
-                                "5-15°(缓坡)": float(((slope >= 5) & (slope < 15)).sum() / slope.size * 100),
-                                "15-25°(中坡)": float(((slope >= 15) & (slope < 25)).sum() / slope.size * 100),
-                                "25-35°(陡坡)": float(((slope >= 25) & (slope < 35)).sum() / slope.size * 100),
-                                ">35°(急坡)": float((slope >= 35).sum() / slope.size * 100),
-                            }
-                        except Exception as e:
-                            info["slope_error"] = str(e)
-            else:
-                info["status"] = "unsupported"
-                info["message"] = f"暂不支持的文件格式：{ext}"
+                            gdf_proj = gdf.to_crs(epsg=3857) if gdf.crs else gdf
+                            if any(gdf.geom_type.str.contains("Polygon")):
+                                res["area_km2"] = round(gdf_proj.geometry.area.sum() / 1e6, 4)
+                            if any(gdf.geom_type.str.contains("LineString")):
+                                res["length_km"] = round(gdf_proj.geometry.length.sum() / 1000, 4)
+                        except Exception:
+                            pass
+
+                    res["attribute_preview"] = gdf.head(5).drop(columns=["geometry"], errors="ignore").to_dict(orient="records")
+
+                elif fext in [".tif", ".tiff", ".dem", ".asc"]:
+                    import rasterio
+                    with rasterio.open(path) as src:
+                        res["raster_width"] = src.width
+                        res["raster_height"] = src.height
+                        res["crs"] = str(src.crs)
+                        res["bounds"] = list(src.bounds)
+                        res["resolution"] = list(src.res)
+                        res["band_count"] = src.count
+                        band1 = src.read(1, masked=True)
+                        res["min_value"] = float(band1.min()) if band1.count() > 0 else None
+                        res["max_value"] = float(band1.max()) if band1.count() > 0 else None
+                        res["mean_value"] = float(band1.mean()) if band1.count() > 0 else None
+
+                        if atype == "slope":
+                            try:
+                                import numpy as np
+                                dy, dx = np.gradient(band1.filled(0), src.res[0], src.res[1])
+                                slope = np.degrees(np.arctan(np.sqrt(dx * dx + dy * dy)))
+                                res["slope_min"] = float(slope.min())
+                                res["slope_max"] = float(slope.max())
+                                res["slope_mean"] = float(slope.mean())
+                                res["slope_classes"] = {
+                                    "0-5°(平地)": float((slope < 5).sum() / slope.size * 100),
+                                    "5-15°(缓坡)": float(((slope >= 5) & (slope < 15)).sum() / slope.size * 100),
+                                    "15-25°(中坡)": float(((slope >= 15) & (slope < 25)).sum() / slope.size * 100),
+                                    "25-35°(陡坡)": float(((slope >= 25) & (slope < 35)).sum() / slope.size * 100),
+                                    ">35°(急坡)": float((slope >= 35).sum() / slope.size * 100),
+                                }
+                            except Exception as e:
+                                res["slope_error"] = str(e)
+                else:
+                    res["status"] = "unsupported"
+                    res["message"] = f"暂不支持的文件格式：{fext}"
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                res["status"] = "error"
+                res["error"] = str(e)
+            return res
+
+        try:
+            analyzed = await asyncio.to_thread(_analyze_gis, file_path, ext, analysis_type)
+            info.update(analyzed)
         except Exception as e:
             info["status"] = "error"
             info["error"] = str(e)
@@ -691,11 +796,14 @@ async def gis_analyze(
         results.append(info)
         try:
             os.remove(file_path)
-        except:
+        except Exception:
             pass
 
     return {
-        "success": True,
+        "success": gis_ok,
+        "limited": not gis_ok,
+        "message": "分析完成" if gis_ok else "GIS依赖库未安装，已返回文件基础信息。安装 geopandas/rasterio/shapely/pyproj 后可进行坡度/汇水/淹没等空间分析。",
+        "install_hint": "pip install geopandas rasterio shapely pyproj" if not gis_ok else None,
         "analysis_type": analysis_type,
         "file_count": len(files),
         "results": results,

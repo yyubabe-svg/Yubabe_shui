@@ -1,11 +1,12 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send, FileText, AlertTriangle, Sparkles, Crown } from 'lucide-react'
-import api from '../api/client'
+import api, { getStoredUserName, triggerUpgrade, triggerAuthError } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 
 interface Source {
   file_name: string
   page_number?: number
+  section_title?: string
   text: string
   score: number
 }
@@ -22,6 +23,36 @@ const QUICK_QUESTIONS = [
   '水利工程质量控制分级标准是什么？',
 ]
 
+// SSE事件解析器（与Agent页面一致的实现）
+function parseSSEEvents(buffer: string): { events: Array<{event: string, data: any}>, remaining: string } {
+  const events: Array<{event: string, data: any}> = []
+  const lines = buffer.split('\n')
+  let currentEvent = 'message'
+  let currentData = ''
+  let i = 0
+
+  for (; i < lines.length - 1; i++) {
+    let line = lines[i].replace(/\r$/, '')
+
+    if (line.startsWith('event:')) {
+      currentEvent = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      currentData += line.slice(5).trim()
+    } else if (line === '') {
+      if (currentData) {
+        try {
+          events.push({ event: currentEvent, data: JSON.parse(currentData) })
+        } catch (e) {}
+        currentData = ''
+        currentEvent = 'message'
+      }
+    }
+  }
+
+  const remaining = lines.slice(i).join('\n')
+  return { events, remaining }
+}
+
 export default function QA() {
   const { user, openUpgrade, refreshUsage } = useAuth()
   const [messages, setMessages] = useState<Message[]>([
@@ -32,15 +63,24 @@ export default function QA() {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [streamingContent, setStreamingContent] = useState('')
+  const [currentSources, setCurrentSources] = useState<Source[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
+  // 自动滚动：流式期间瞬间跳转，完成后smooth
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (loading || streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, streamingContent, loading])
 
   const qaDisabled = !user?.is_pro && (user?.daily_qa_remaining ?? 0) <= 0
 
-  const handleSend = async (question?: string) => {
+  const handleSend = useCallback(async (question?: string) => {
     const q = (question || input).trim()
     if (!q || loading) return
     if (qaDisabled) {
@@ -50,27 +90,120 @@ export default function QA() {
 
     setInput('')
     setLoading(true)
+    setStreamingContent('')
+    setCurrentSources([])
     setMessages(prev => [...prev, { role: 'user', content: q }])
 
+    const abortController = new AbortController()
+    abortRef.current = abortController
+
     try {
-      const res = await api.post('/qa/query', { question: q })
+      const name = getStoredUserName()
+      const encodedName = name ? encodeURIComponent(name) : ''
+      
+      const response = await fetch('/api/qa/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Name': encodedName,
+          'X-Username': encodedName,
+        },
+        body: JSON.stringify({ question: q, top_k: 5 }),
+        signal: abortController.signal,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        let errorMsg = '抱歉，问答服务暂时不可用，请稍后重试。'
+        try {
+          const errJson = JSON.parse(errorText)
+          if (errJson.detail) {
+            errorMsg = errJson.detail
+            if (errorMsg.includes('升级')) {
+              triggerUpgrade(undefined, errorMsg)
+              setLoading(false)
+              setStreamingContent('')
+              return
+            }
+          }
+        } catch {}
+        if (response.status === 401) {
+          triggerAuthError()
+          return
+        }
+        throw new Error(errorMsg)
+      }
+
+      if (!response.body) {
+        throw new Error('响应体为空')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullAnswer = ''
+      let sources: Source[] = []
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const { events, remaining } = parseSSEEvents(buffer)
+        buffer = remaining
+
+        for (const evt of events) {
+          if (evt.event === 'sources') {
+            sources = evt.data || []
+            setCurrentSources(sources)
+          } else if (evt.event === 'token') {
+            const token = evt.data?.content || ''
+            fullAnswer += token
+            setStreamingContent(fullAnswer)
+          } else if (evt.event === 'error') {
+            throw new Error(evt.data?.error || 'AI回答生成失败')
+          } else if (evt.event === 'done') {
+            fullAnswer = evt.data?.content || fullAnswer
+          }
+        }
+      }
+
+      // 完成：添加最终消息
       setMessages(prev => [...prev, {
         role: 'ai',
-        content: res.data.answer,
-        sources: res.data.sources,
+        content: fullAnswer || '抱歉，未能生成有效回答。',
+        sources: sources.length > 0 ? sources : undefined,
       }])
-      // 刷新额度
+      setStreamingContent('')
+      setCurrentSources([])
       refreshUsage()
+
     } catch (err: any) {
-      const detail = err?.response?.data?.detail
-      setMessages(prev => [...prev, {
-        role: 'ai',
-        content: detail?.includes('升级') ? detail : '抱歉，问答服务暂时不可用，请稍后重试。',
-      }])
+      if (err.name === 'AbortError') {
+        // 用户主动停止，保留已生成内容
+        if (streamingContent) {
+          setMessages(prev => [...prev, {
+            role: 'ai',
+            content: streamingContent + '\n\n[已停止生成]',
+            sources: currentSources.length > 0 ? currentSources : undefined,
+          }])
+        }
+      } else {
+        const detail = err?.message || '抱歉，问答服务暂时不可用，请稍后重试。'
+        setMessages(prev => [...prev, {
+          role: 'ai',
+          content: detail.includes('升级') ? detail : '抱歉，问答服务暂时不可用，请稍后重试。',
+        }])
+      }
+      setStreamingContent('')
+      setCurrentSources([])
     } finally {
       setLoading(false)
+      abortRef.current = null
+      // 发送后自动聚焦输入框
+      setTimeout(() => inputRef.current?.focus(), 100)
     }
-  }
+  }, [input, loading, qaDisabled, openUpgrade, refreshUsage, streamingContent, currentSources])
 
   if (!user) return null
 
@@ -79,7 +212,7 @@ export default function QA() {
       <div className="page-header mb-4 flex-shrink-0 flex items-start justify-between">
         <div>
           <h1>知识问答</h1>
-          <p>基于本地知识库的 RAG 问答，回答附带来源引用</p>
+          <p>基于本地知识库的 RAG 问答，回答附带来源引用（流式输出）</p>
         </div>
         {!user.is_pro && (
           <div className="text-xs text-neutral-500 bg-neutral-50 border border-neutral-200 px-3 py-1.5 rounded">
@@ -123,13 +256,13 @@ export default function QA() {
                       <FileText className="w-3 h-3" /> 引用来源
                     </p>
                     <div className="space-y-1.5">
-                      {msg.sources.slice(0, 3).map((s, j) => (
+                      {msg.sources.slice(0, 5).map((s, j) => (
                         <div key={j} className="text-xs bg-neutral-50 px-2.5 py-2 rounded">
                           <p className="font-medium text-neutral-700">
                             {s.file_name}
-                            {s.page_number && <span className="text-neutral-400 ml-1">· 第{s.page_number}页</span>}
+                            {s.page_number && <span className="text-neutral-400 ml-1">· {s.page_number}</span>}
                           </p>
-                          <p className="text-neutral-500 mt-0.5 leading-relaxed">{s.text?.substring(0, 120)}…</p>
+                          <p className="text-neutral-500 mt-0.5 leading-relaxed">{s.text?.substring(0, 150)}…</p>
                         </div>
                       ))}
                     </div>
@@ -138,7 +271,19 @@ export default function QA() {
               </div>
             </div>
           ))}
-          {loading && (
+          
+          {/* 流式输出中的消息 */}
+          {loading && streamingContent && (
+            <div className="flex justify-start">
+              <div className="chat-bubble-ai max-w-[80%]">
+                <div className="whitespace-pre-wrap leading-relaxed">{streamingContent}</div>
+                <span className="inline-block w-2 h-4 bg-neutral-400 animate-pulse ml-0.5 align-middle" />
+              </div>
+            </div>
+          )}
+
+          {/* 加载中（等待首token） */}
+          {loading && !streamingContent && (
             <div className="flex justify-start">
               <div className="chat-bubble-ai">
                 <div className="flex items-center gap-1.5">
@@ -149,6 +294,25 @@ export default function QA() {
               </div>
             </div>
           )}
+
+          {/* 流式消息的引用来源（在token接收完之前显示） */}
+          {loading && currentSources.length > 0 && streamingContent && (
+            <div className="flex justify-start">
+              <div className="chat-bubble-ai max-w-[80%] opacity-60">
+                <p className="text-[11px] font-medium text-neutral-500 mb-2 flex items-center gap-1 uppercase tracking-wider">
+                  <FileText className="w-3 h-3" /> 引用来源（生成中）
+                </p>
+                <div className="space-y-1.5">
+                  {currentSources.slice(0, 5).map((s, j) => (
+                    <div key={j} className="text-xs bg-neutral-50 px-2.5 py-2 rounded">
+                      <p className="font-medium text-neutral-700">{s.file_name}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -161,7 +325,8 @@ export default function QA() {
               <button
                 key={i}
                 onClick={() => handleSend(q)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-white border border-neutral-200 text-neutral-600 rounded-md hover:border-brand-400 hover:text-brand-700 hover:bg-brand-50/50 transition-colors"
+                disabled={loading}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-white border border-neutral-200 text-neutral-600 rounded-md hover:border-brand-400 hover:text-brand-700 hover:bg-brand-50/50 transition-colors disabled:opacity-50"
               >
                 <Sparkles className="w-3 h-3" strokeWidth={1.75} />
                 {q}
@@ -174,6 +339,7 @@ export default function QA() {
       {/* 输入区 */}
       <div className="flex gap-2 flex-shrink-0">
         <input
+          ref={inputRef}
           type="text"
           value={input}
           onChange={e => setInput(e.target.value)}
@@ -181,6 +347,7 @@ export default function QA() {
           placeholder={qaDisabled ? "今日次数已用完，升级Pro继续使用" : "输入问题，按 Enter 发送..."}
           className="flex-1 input"
           disabled={loading || qaDisabled}
+          autoFocus
         />
         <button
           onClick={() => handleSend()}

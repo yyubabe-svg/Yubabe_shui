@@ -137,8 +137,9 @@ export default function ISO() {
   const handleConfirm = async () => {
     if (!result || !editedInfo) return
     try {
-      await api.post('/iso/fill', { task_id: result.task_id, project_info: editedInfo })
-      setResult({ ...result, project_info: editedInfo })
+      const fillRes = await api.post('/iso/fill', { task_id: result.task_id, project_info: editedInfo })
+      // 合并fill接口返回的新数据（可能包含更新后的download_url）
+      setResult({ ...result, ...fillRes.data, project_info: editedInfo })
       setActiveStep('download')
     } catch {
       setError('文档更新失败，请重试')
@@ -146,7 +147,10 @@ export default function ISO() {
   }
 
   const handleDownload = () => {
-    if (result?.download_url) window.open(`/api${result.download_url}`, '_blank')
+    if (result?.download_url) {
+      // download_url已包含/api前缀（后端返回如/api/iso/download/xxx），直接使用
+      window.open(result.download_url, '_blank')
+    }
   }
 
   const updateField = <K extends keyof ProjectInfo>(field: K, value: ProjectInfo[K]) => {

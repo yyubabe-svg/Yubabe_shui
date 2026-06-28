@@ -27,6 +27,7 @@ export default function ChatInput({ onSend, onStop, disabled, isStreaming, place
     setValue('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
+      textareaRef.current.focus()
     }
   }
 

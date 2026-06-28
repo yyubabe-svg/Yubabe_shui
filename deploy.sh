@@ -45,7 +45,11 @@ fi
 # 2. 创建必要目录
 echo ""
 echo "[2/5] 创建数据目录..."
-mkdir -p backend/uploads backend/vector_db backend/resources/iso_templates backend/keys
+mkdir -p backend/uploads backend/vector_db backend/db_data backend/resources/iso_templates backend/keys
+# 确保数据库文件存在（避免Docker将挂载点创建为目录）
+if [ ! -f backend/db_data/shushui_ai.db ]; then
+    touch backend/db_data/shushui_ai.db
+fi
 echo "✅ 数据目录已创建"
 
 # 3. 检查.env.prod配置

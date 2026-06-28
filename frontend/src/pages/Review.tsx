@@ -50,9 +50,7 @@ export default function Review() {
     try {
       const formData = new FormData()
       formData.append('file', f)
-      const uploadRes = await api.post('/review/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
+      const uploadRes = await api.post('/review/upload', formData)
 
       const analyzeRes = await api.post('/review/analyze', {
         file_path: uploadRes.data.file_path,

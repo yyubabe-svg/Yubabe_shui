@@ -1,4 +1,23 @@
-import api from './client'
+import api, { STORAGE_KEY } from './client'
+
+// 辅助函数：获取认证Headers（URL编码中文用户名）
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const data = JSON.parse(raw)
+      if (data.name && typeof data.name === 'string') {
+        const encodedName = encodeURIComponent(data.name.trim())
+        headers['X-User-Name'] = encodedName
+        headers['X-Username'] = encodedName
+      }
+    }
+  } catch {}
+  return headers
+}
 
 // ==================== 类型定义 ====================
 
@@ -233,18 +252,42 @@ export interface WorkspaceTask {
   created_at: string
 }
 
-// 工具函数：POST下载
+// 工具函数：POST下载Blob
 export async function downloadPost(url: string, data?: any): Promise<Blob> {
   const fullUrl = `/api${url}`
   const response = await fetch(fullUrl, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: getAuthHeaders(),
     body: data ? JSON.stringify(data) : undefined,
   })
   if (!response.ok) throw new Error('下载失败')
   return response.blob()
+}
+
+// 工具函数：触发浏览器下载Blob
+export function triggerBlobDownload(blob: Blob, defaultFilename: string, contentDisposition?: string | null) {
+  // 尝试从 Content-Disposition 中提取文件名
+  let filename = defaultFilename
+  if (contentDisposition) {
+    const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+    const plainMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+    const match = utf8Match || plainMatch
+    if (match) {
+      try {
+        filename = decodeURIComponent(match[1])
+      } catch {
+        filename = match[1]
+      }
+    }
+  }
+  const blobUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
 }
 
 // ==================== API 封装 ====================
@@ -300,13 +343,14 @@ export const workspaceApi = {
     api.get<SectionTaskDetail>(`/workspace/section-tasks/${taskId}`).then(r => r.data),
 
   // 流式生成（返回fetch Promise，SSE由调用方处理）
-  streamSectionGenerate: (taskId: number | string, startFrom?: string): Promise<Response> => {
+  streamSectionGenerate: (taskId: number | string, startFrom?: string, signal?: AbortSignal): Promise<Response> => {
     const url = new URL(`/api/workspace/section-tasks/${taskId}/generate`, window.location.origin)
     if (startFrom) url.searchParams.set('start_from', startFrom)
     return fetch(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ start_from: startFrom }),
+      signal,
     })
   },
 
@@ -316,8 +360,16 @@ export const workspaceApi = {
   acceptSectionDraft: (draftId: number | string) =>
     api.post<{ message: string }>(`/workspace/section-drafts/${draftId}/accept`).then(r => r.data),
 
-  exportSection: (taskId: number | string) =>
-    `/api/workspace/section-tasks/${taskId}/export`,
+  exportSection: async (taskId: number | string): Promise<{ blob: Blob; contentDisposition: string | null }> => {
+    const response = await api.post(`/workspace/section-tasks/${taskId}/export`, {}, {
+      responseType: 'blob',
+      timeout: 300000,
+    })
+    return {
+      blob: response.data as Blob,
+      contentDisposition: response.headers['content-disposition'] || null,
+    }
+  },
 
   // ========== AI初审 ==========
   createReviewTask: (projectId: number | string, data: { document_id: number; dimensions?: string[] }) =>
@@ -336,8 +388,16 @@ export const workspaceApi = {
   updateReviewIssue: (issueId: number | string, data: { status?: IssueStatus; note?: string }) =>
     api.patch<{ message: string }>(`/workspace/review-issues/${issueId}`, data).then(r => r.data),
 
-  exportReviewReport: (taskId: number | string) =>
-    `/api/workspace/review-tasks/${taskId}/export`,
+  exportReviewReport: async (taskId: number | string): Promise<{ blob: Blob; contentDisposition: string | null }> => {
+    const response = await api.post(`/workspace/review-tasks/${taskId}/export`, {}, {
+      responseType: 'blob',
+      timeout: 300000,
+    })
+    return {
+      blob: response.data as Blob,
+      contentDisposition: response.headers['content-disposition'] || null,
+    }
+  },
 
   // ========== 专家意见回复 ==========
   createExpertReplyTask: (projectId: number | string, data: {
@@ -368,8 +428,16 @@ export const workspaceApi = {
   }) =>
     api.patch<{ message: string }>(`/workspace/expert-opinions/${opinionId}`, data).then(r => r.data),
 
-  exportReplyTable: (taskId: number | string) =>
-    `/api/workspace/expert-reply-tasks/${taskId}/export`,
+  exportReplyTable: async (taskId: number | string): Promise<{ blob: Blob; contentDisposition: string | null }> => {
+    const response = await api.post(`/workspace/expert-reply-tasks/${taskId}/export`, {}, {
+      responseType: 'blob',
+      timeout: 300000,
+    })
+    return {
+      blob: response.data as Blob,
+      contentDisposition: response.headers['content-disposition'] || null,
+    }
+  },
 
   // ========== 文档管理 ==========
   listDocuments: (projectId: number | string) =>
@@ -382,7 +450,6 @@ export const workspaceApi = {
       `/workspace/projects/${projectId}/documents`,
       formData,
       {
-        headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 300000,
         onUploadProgress: (e: any) => {
           if (onProgress && e.total) {

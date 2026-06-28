@@ -1,6 +1,8 @@
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+import asyncio
+import aiofiles
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Request
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.config import settings
@@ -19,12 +21,17 @@ async def upload_file(
     doc_type: Optional[str] = Form("其他"),
     user: UserUsage = Depends(get_current_user),
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
-    """上传文件并创建文档记录（需登录，检查额度）"""
+    """上传文件并创建文档记录（需登录，检查额度）- 修复13：aiofiles异步写入、修复裸except、移除绝对路径"""
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     
     file_ext = os.path.splitext(file.filename)[1].lower()
-    allowed_extensions = {'.pdf', '.doc', '.docx', '.txt', '.md', '.markdown'}
+    
+    # 修复13：移除.doc格式支持（python-docx无法解析）
+    allowed_extensions = {'.pdf', '.docx', '.txt', '.md', '.markdown', '.xlsx', '.xls'}
+    if file_ext == '.doc':
+        raise HTTPException(status_code=400, detail=".doc格式不支持，请转换为.docx后再上传")
     if file_ext not in allowed_extensions:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {file_ext}")
     
@@ -32,24 +39,41 @@ async def upload_file(
     saved_filename = f"{file_id}{file_ext}"
     file_path = os.path.join(settings.UPLOAD_DIR, saved_filename)
     
+    # 修复13：先检查Content-Length头部，避免读取大文件到内存后才发现超限
+    content_length = 0
+    if request and "content-length" in request.headers:
+        try:
+            content_length = int(request.headers["content-length"])
+        except (ValueError, TypeError):
+            pass
+    
+    max_allowed = settings.PRO_MAX_FILE_SIZE if user.is_pro_active() else settings.FREE_MAX_FILE_SIZE
+    
+    if content_length > 0 and content_length > max_allowed:
+        limit_mb = max_allowed // 1024 // 1024
+        raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
+    
     try:
-        contents = await file.read()
-        file_size = len(contents)
+        # 修复13：使用aiofiles异步流式写入，避免一次性read到内存
+        file_size = 0
+        async with aiofiles.open(file_path, 'wb') as f:
+            # 分块读取并写入
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                await f.write(chunk)
+                file_size += len(chunk)
+                # 写入过程中检查大小限制
+                if file_size > max_allowed:
+                    limit_mb = max_allowed // 1024 // 1024
+                    raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
         
         # 检查文件大小和存储额度（非Mock模式）
         if not settings.MOCK_MODE:
             check = check_feature_access(user, "upload", file_size=file_size, db=db)
             if not check.allowed:
+                # 清理文件
+                if os.path.exists(file_path):
+                    await _safe_remove(file_path)
                 raise HTTPException(status_code=402, detail=check.reason)
-        
-        # Mock模式下也检查基础大小限制
-        max_allowed = settings.PRO_MAX_FILE_SIZE if user.is_pro_active() else settings.FREE_MAX_FILE_SIZE
-        if file_size > max_allowed:
-            limit_mb = max_allowed // 1024 // 1024
-            raise HTTPException(status_code=400, detail=f"文件大小超过限制({limit_mb}MB)")
-        
-        with open(file_path, 'wb') as f:
-            f.write(contents)
         
         # 创建文档记录
         doc_title = title or os.path.splitext(file.filename)[0]
@@ -83,10 +107,10 @@ async def upload_file(
             user.total_upload_bytes += file_size
             db.commit()
         
+        # 修复13：返回值中移除file_path绝对路径（安全考虑）
         return {
             "file_id": file_id,
             "doc_id": doc.id,
-            "file_path": file_path,
             "original_filename": file.filename,
             "file_size": file_size,
             "title": doc_title,
@@ -94,16 +118,18 @@ async def upload_file(
         }
     except HTTPException:
         # 清理已保存的文件
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass
+        await _safe_remove(file_path)
         raise
     except Exception as e:
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass
+        await _safe_remove(file_path)
         raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
+
+
+async def _safe_remove(path: str):
+    """安全删除文件（修复13：使用asyncio.to_thread包裹同步os.remove，修复裸except）"""
+    if os.path.exists(path):
+        try:
+            await asyncio.to_thread(os.remove, path)
+        except Exception:
+            # 修复13：不再使用裸except
+            pass

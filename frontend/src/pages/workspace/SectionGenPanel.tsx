@@ -8,6 +8,7 @@ import {
 import { useProject } from '../../context/ProjectContext'
 import {
   workspaceApi,
+  triggerBlobDownload,
   type SectionTemplate,
   type SectionTaskDetail,
   type SectionDraft,
@@ -79,7 +80,7 @@ export default function SectionGenPanel() {
 
   // ========== 导出 ==========
   const [exporting, setExporting] = useState(false)
-  const [exportUrl, setExportUrl] = useState('')
+  const [exported, setExported] = useState(false)
 
   // ========== 通用 ==========
   const [loading, setLoading] = useState(false)
@@ -424,9 +425,9 @@ export default function SectionGenPanel() {
     setExporting(true)
     setError('')
     try {
-      const url = workspaceApi.exportSection(taskId)
-      setExportUrl(url)
-      window.open(url, '_blank')
+      const { blob, contentDisposition } = await workspaceApi.exportSection(taskId)
+      triggerBlobDownload(blob, '章节报告.docx', contentDisposition)
+      setExported(true)
     } catch (e: any) {
       setError(e?.response?.data?.detail || '导出失败')
     } finally {
@@ -449,7 +450,7 @@ export default function SectionGenPanel() {
     setActiveParagraphId(null)
     setEditingDraftId(null)
     setEditingContent('')
-    setExportUrl('')
+    setExported(false)
     setError('')
   }
 
@@ -1028,7 +1029,7 @@ export default function SectionGenPanel() {
               </span>
             </div>
 
-            {exportUrl && (
+            {exported && (
               <div className="border border-green-200 bg-green-50 px-4 py-3 rounded-lg mb-4 text-left">
                 <p className="text-xs text-green-800 flex items-center gap-1.5">
                   <CheckCircle2 className="w-3.5 h-3.5" />

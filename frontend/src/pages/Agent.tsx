@@ -34,10 +34,14 @@ export default function Agent() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // 滚动到底部
+  // 滚动到底部：流式输出期间用auto（瞬间跳转），完成后用smooth
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingContent, thinkingSteps])
+    if (isStreaming || streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, streamingContent, thinkingSteps, isStreaming])
 
   // 会话变化时刷新列表
   useEffect(() => {

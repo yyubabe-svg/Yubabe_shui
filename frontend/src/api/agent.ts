@@ -41,20 +41,22 @@ export const agentApi = {
     api.get<{ tools: ToolSchema[]; total: number }>('/agent/tools').then(r => r.data),
 
   // SSE流式对话 - 返回fetch Response供流式读取
-  chatStream: (message: string, sessionId?: string) => {
+  chatStream: (message: string, sessionId?: string, signal?: AbortSignal) => {
     const userName = getCurrentUserName()
+    const encodedUserName = encodeURIComponent(userName)
     return fetch('/api/agent/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-User-Name': userName,
-        'X-Username': userName,
+        'X-User-Name': encodedUserName,
+        'X-Username': encodedUserName,
       },
       body: JSON.stringify({
         message,
         session_id: sessionId,
         user_name: userName,
       }),
+      signal,
     })
   },
 }

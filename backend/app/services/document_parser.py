@@ -45,8 +45,9 @@ class DocumentParser:
     """增强版文档解析器，支持页码、章节、表格结构化、Excel"""
     
     def __init__(self):
-        self.chunk_size = getattr(settings, 'CHUNK_SIZE', 800)
-        self.chunk_overlap = getattr(settings, 'CHUNK_OVERLAP', 150)
+        # 修复5：默认值与config.py保持一致（500/100）
+        self.chunk_size = getattr(settings, 'CHUNK_SIZE', 500)
+        self.chunk_overlap = getattr(settings, 'CHUNK_OVERLAP', 100)
         # 章节标题正则模式
         self.chapter_patterns = [
             re.compile(r'^第[一二三四五六七八九十百]+[章节篇编]\s+(.+)$'),
@@ -66,8 +67,13 @@ class DocumentParser:
         
         if ext == '.pdf':
             return self._parse_pdf_structured(file_path)
-        elif ext in ['.docx', '.doc']:
+        elif ext == '.docx':
             return self._parse_docx_structured(file_path)
+        elif ext == '.doc':
+            # 修复5：python-docx不支持.doc格式，返回明确提示
+            doc = ParsedDocument(file_path=file_path, file_type="doc")
+            doc.full_text = "[不支持的格式] .doc 是旧版Word格式，请转换为.docx后再上传。"
+            return doc
         elif ext in ['.xlsx', '.xls']:
             return self._parse_excel_structured(file_path)
         elif ext == '.txt':
@@ -101,16 +107,16 @@ class DocumentParser:
         return parsed, chunks
     
     def _parse_pdf_structured(self, file_path: str) -> ParsedDocument:
-        """结构化解析PDF"""
+        """结构化解析PDF - 修复5+6：优先fitz(PyMuPDF)，其次pdfplumber，最后PyPDF2，支持表格提取"""
         doc = ParsedDocument(file_path=file_path, file_type="pdf")
+        
+        # 第一优先级：fitz (PyMuPDF) - 性能最佳
         try:
             import fitz
             pdf_doc = fitz.open(file_path)
             doc.total_pages = len(pdf_doc)
-            
             all_text_parts = []
             current_page_texts = []
-            table_index = 0
             
             for page_num, page in enumerate(pdf_doc, 1):
                 page_text = page.get_text()
@@ -119,17 +125,83 @@ class DocumentParser:
             
             doc.pages = current_page_texts
             doc.full_text = "\n".join(all_text_parts)
-            
-            # 尝试检测章节和表格
             doc.chapters = self._extract_chapters(doc.full_text)
-            doc.tables = self._extract_tables_from_text(doc.full_text, table_index)
-            
             pdf_doc.close()
+            return doc
+        except ImportError:
+            print("[PDF解析] PyMuPDF(fitz)未安装，尝试pdfplumber...")
         except Exception as e:
-            print(f"PDF结构化解析失败: {e}")
-            doc.full_text = self._parse_pdf(file_path)
+            print(f"fitz解析PDF失败: {e}，尝试pdfplumber...")
         
-        return doc
+        # 第二优先级：pdfplumber（支持表格提取）
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                doc.total_pages = len(pdf.pages)
+                all_text_parts = []
+                current_page_texts = []
+                table_index = 0
+                
+                for page_num, page in enumerate(pdf.pages, 1):
+                    page_text = page.extract_text() or ""
+                    current_page_texts.append({"page_number": page_num, "text": page_text})
+                    all_text_parts.append(page_text)
+                    
+                    # 使用pdfplumber提取表格
+                    try:
+                        tables_on_page = page.extract_tables() or []
+                        for tbl in tables_on_page:
+                            if not tbl or len(tbl) < 2:
+                                continue
+                            parsed_table = ParsedTable(
+                                table_index=table_index,
+                                page_number=page_num,
+                            )
+                            parsed_table.headers = [str(cell).strip() if cell else "" for cell in tbl[0]]
+                            parsed_table.rows = [
+                                [str(cell).strip() if cell else "" for cell in row]
+                                for row in tbl[1:]
+                            ]
+                            parsed_table.rows = [r for r in parsed_table.rows if any(c for c in r)]
+                            if parsed_table.rows:
+                                doc.tables.append(parsed_table)
+                                table_text = self._table_to_text(parsed_table)
+                                if table_text:
+                                    all_text_parts.append(table_text)
+                                table_index += 1
+                    except Exception as te:
+                        print(f"PDF表格提取失败(页{page_num}): {te}")
+                
+                doc.pages = current_page_texts
+                doc.full_text = "\n".join(all_text_parts)
+                doc.chapters = self._extract_chapters(doc.full_text)
+            return doc
+        except ImportError:
+            print("[PDF解析] pdfplumber未安装，尝试PyPDF2...")
+        except Exception as e:
+            print(f"pdfplumber解析PDF失败: {e}，尝试PyPDF2...")
+        
+        # 第三优先级：PyPDF2（纯文本，无表格）
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(file_path)
+            doc.total_pages = len(reader.pages)
+            all_text_parts = []
+            current_page_texts = []
+            
+            for page_num, page in enumerate(reader.pages, 1):
+                page_text = page.extract_text() or ""
+                current_page_texts.append({"page_number": page_num, "text": page_text})
+                all_text_parts.append(page_text)
+            
+            doc.pages = current_page_texts
+            doc.full_text = "\n".join(all_text_parts)
+            doc.chapters = self._extract_chapters(doc.full_text)
+            return doc
+        except Exception as e:
+            print(f"PyPDF2解析PDF也失败: {e}")
+            doc.full_text = ""
+            return doc
     
     def _parse_docx_structured(self, file_path: str) -> ParsedDocument:
         """结构化解析DOCX"""
@@ -278,7 +350,8 @@ class DocumentParser:
         return doc
     
     def _parse_pdf(self, file_path: str) -> str:
-        """解析PDF文件（兼容旧接口）"""
+        """解析PDF文件（兼容旧接口）- 修复5+6：优先fitz，其次pdfplumber，最后PyPDF2"""
+        # 第一优先级：fitz (PyMuPDF)
         try:
             import fitz
             pdf_doc = fitz.open(file_path)
@@ -286,6 +359,41 @@ class DocumentParser:
             for page in pdf_doc:
                 text_parts.append(page.get_text())
             pdf_doc.close()
+            return "\n".join(text_parts)
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"fitz解析PDF失败: {e}")
+        
+        # 第二优先级：pdfplumber（含表格）
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                text_parts = []
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_parts.append(text)
+                    for tbl in (page.extract_tables() or []):
+                        for row in tbl:
+                            row_text = " | ".join(str(c).strip() if c else "" for c in row)
+                            if row_text.strip(" |"):
+                                text_parts.append(row_text)
+                return "\n".join(text_parts)
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"pdfplumber解析PDF失败: {e}")
+        
+        # 第三优先级：PyPDF2
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(file_path)
+            text_parts = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    text_parts.append(text)
             return "\n".join(text_parts)
         except Exception as e:
             print(f"PDF解析失败: {e}")
@@ -382,10 +490,42 @@ class DocumentParser:
         return chapters
     
     def _extract_tables_from_text(self, text: str, start_index: int = 0) -> List[ParsedTable]:
-        """从文本中简单提取表格（按连续|分隔行判断）"""
+        """从文本中简单提取表格（按连续|分隔行判断）- 主要用于非PDF格式"""
         tables = []
-        # 简单实现，DOCX的表格解析更准确
+        # 修复5：PDF表格已在_parse_pdf_structured中通过pdfplumber提取，此处仅处理纯文本中的表格
+        lines = text.split('\n')
+        table_lines = []
+        for line in lines:
+            if '|' in line and line.count('|') >= 2:
+                table_lines.append(line)
+            else:
+                if len(table_lines) >= 2:
+                    # 尝试解析为表格
+                    rows = []
+                    for tl in table_lines:
+                        cells = [c.strip() for c in tl.split('|') if c.strip()]
+                        if cells:
+                            rows.append(cells)
+                    if len(rows) >= 2:
+                        t = ParsedTable(table_index=start_index + len(tables))
+                        t.headers = rows[0]
+                        t.rows = rows[1:]
+                        if any(any(c for c in r) for r in t.rows):
+                            tables.append(t)
+                table_lines = []
         return tables
+    
+    @staticmethod
+    def _table_to_text(table: ParsedTable) -> str:
+        """将ParsedTable转换为文本表示"""
+        lines = []
+        if table.caption:
+            lines.append(table.caption)
+        if table.headers:
+            lines.append(" | ".join(table.headers))
+        for row in table.rows:
+            lines.append(" | ".join(row))
+        return "\n".join(lines)
     
     def _chapter_aware_chunk(self, parsed: ParsedDocument) -> List[Dict[str, Any]]:
         """章节感知分块：先按章节切分，章节内滑动窗口"""
@@ -478,13 +618,22 @@ class DocumentParser:
                     chunks.append(current_chunk)
                 
                 if len(para) > chunk_size:
+                    # 修复：超长段落切分后需要正确设置current_chunk为overlap尾部，避免丢失
                     start = 0
+                    last_tail = ""
                     while start < len(para):
                         end = start + chunk_size
                         chunk = para[start:end]
                         if chunk:
                             chunks.append(chunk)
+                            # 保存尾部用于overlap
+                            if len(chunk) >= overlap:
+                                last_tail = chunk[-overlap:]
+                            else:
+                                last_tail = chunk
                         start = end - overlap
+                    # 将overlap尾部设为current_chunk，使后续段落能正确衔接
+                    current_chunk = last_tail if last_tail else ""
                 else:
                     current_chunk = para
         

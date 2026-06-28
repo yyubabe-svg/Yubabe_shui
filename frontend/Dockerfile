@@ -21,12 +21,8 @@ FROM nginx:alpine
 # 复制Nginx配置
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# 复制构建产物
+# 复制构建产物（包含qrcodes目录）
 COPY --from=builder /app/dist /usr/share/nginx/html
-
-# 创建qrcodes目录并复制二维码图片（如果存在）
-RUN mkdir -p /usr/share/nginx/html/qrcodes
-COPY --from=builder /app/dist/qrcodes/* /usr/share/nginx/html/qrcodes/ 2>/dev/null || true
 
 EXPOSE 80
 
